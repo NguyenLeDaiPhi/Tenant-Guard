@@ -49,13 +49,14 @@ class SmtpVerificationEmailSenderTests {
 
     @Test
     void throwsEmailDeliveryExceptionWhenMailSenderFails() {
-        doThrow(new MailSendException("SMTP connection refused"))
+        MailSendException mailException = new MailSendException("SMTP connection refused");
+        doThrow(mailException)
                 .when(mailSender).send(any(SimpleMailMessage.class));
 
         assertThatThrownBy(() -> emailSender.sendVerificationCode(RECIPIENT, RAW_CODE))
                 .isInstanceOf(EmailDeliveryException.class)
-                .hasMessageContaining(RECIPIENT)
-                .hasCauseInstanceOf(MailSendException.class);
+                .hasMessage("Failed to send verification email.")
+                .hasCause(mailException);
     }
 
     @Test
@@ -70,4 +71,3 @@ class SmtpVerificationEmailSenderTests {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }
-

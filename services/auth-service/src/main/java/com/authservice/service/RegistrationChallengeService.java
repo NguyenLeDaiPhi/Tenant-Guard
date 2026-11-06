@@ -94,6 +94,7 @@ public class RegistrationChallengeService {
             existing.consume(now);
             verificationRepository.save(existing);
         }
+        verificationRepository.flush();
 
         String code = generateCode();
         verificationRepository.save(EmailVerificationCode.builder()

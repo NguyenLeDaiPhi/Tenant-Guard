@@ -2,15 +2,16 @@ package com.authservice;
 
 import com.authservice.domain.AccountStatus;
 import com.authservice.domain.AuthenticatedIdentity;
+import com.authservice.domain.IdentityStatus;
 import com.authservice.domain.MembershipStatus;
 import com.authservice.domain.UserRole;
 import com.authservice.persistence.TenantMembershipRepository;
 import com.authservice.persistence.UserAccount;
 import com.authservice.persistence.UserAccountRepository;
+import com.authservice.persistence.UserIdentityRepository;
 import com.authservice.service.AccessTokenService;
 import com.authservice.service.VerificationEmailSender;
 import com.authservice.service.VerificationCodeHasher;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -24,7 +25,6 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.security.KeyPair;
@@ -33,7 +33,6 @@ import java.util.Base64;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -61,14 +60,12 @@ class AuthServiceApplicationTests {
                         throw new ExceptionInInitializerError(exception);
                 }
 
-                if (DockerClientFactory.instance().isDockerAvailable()) {
-                        postgres = new PostgreSQLContainer<>("postgres:16-alpine")
-                                        .withDatabaseName("tenantguard")
-                                        .withUsername("auth_service")
-                                        .withPassword("secret")
-                                        .withInitScript("db/test-init.sql");
-                        postgres.start();
-                }
+                postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+                                .withDatabaseName("tenantguard")
+                                .withUsername("auth_service")
+                                .withPassword("secret")
+                                .withInitScript("db/test-init.sql");
+                postgres.start();
         }
 
         @DynamicPropertySource
@@ -77,11 +74,11 @@ class AuthServiceApplicationTests {
                 registry.add("auth.jwt.public-key-base64", () -> publicKeyBase64);
                 registry.add("spring.mail.host", () -> "localhost");
 
-                if (postgres != null && postgres.isRunning()) {
-                        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-                        registry.add("spring.datasource.username", postgres::getUsername);
-                        registry.add("spring.datasource.password", postgres::getPassword);
-                }
+                registry.add("spring.datasource.url", postgres::getJdbcUrl);
+                registry.add("spring.datasource.username", postgres::getUsername);
+                registry.add("spring.datasource.password", postgres::getPassword);
+                registry.add("spring.flyway.user", postgres::getUsername);
+                registry.add("spring.flyway.password", postgres::getPassword);
         }
 
         @Autowired
@@ -97,6 +94,9 @@ class AuthServiceApplicationTests {
         private UserAccountRepository userAccountRepository;
 
         @Autowired
+        private UserIdentityRepository userIdentityRepository;
+
+        @Autowired
         private JdbcTemplate jdbcTemplate;
 
         @Autowired
@@ -110,11 +110,6 @@ class AuthServiceApplicationTests {
                 jdbcTemplate.update("DELETE FROM public.auth_rate_limits");
         }
 
-        @BeforeAll
-        static void checkDocker() {
-                assumeTrue(postgres != null && postgres.isRunning(), "Docker environment is not available");
-        }
-
         @Test
         void registrationWithoutMembershipReturnsGenericResponseWithoutCreatingAccount() throws Exception {
                 mockMvc.perform(post("/api/auth/register")
@@ -122,11 +117,16 @@ class AuthServiceApplicationTests {
                                 .content(registerBody("unknown@example.com", "SecurePassword123!")))
                                 .andExpect(status().isAccepted())
                                 .andExpect(jsonPath("$.message")
-                                                .value("If this email is eligible, verification instructions will be sent."));
+                                                .value("If this email is eligible, a verification code will be sent."));
 
                 assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(
                                 TENANT_ID, "unknown@example.com")).isEmpty();
-                verify(emailSender, never()).sendVerificationCode(org.mockito.ArgumentMatchers.any(),
+                assertThat(userIdentityRepository.findByNormalizedEmail("unknown@example.com"))
+                                .get()
+                                .extracting(identity -> identity.getStatus())
+                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
+                verify(emailSender).sendVerificationCode(
+                                org.mockito.ArgumentMatchers.eq("unknown@example.com"),
                                 org.mockito.ArgumentMatchers.any());
         }
 
@@ -149,13 +149,13 @@ class AuthServiceApplicationTests {
                                 .content(body))
                                 .andExpect(status().isAccepted());
 
-                UserAccount pending = userAccountRepository
-                                .findByTenantIdAndNormalizedEmail(TENANT_ID, email)
+                var pendingIdentity = userIdentityRepository.findByNormalizedEmail(email)
                                 .orElseThrow();
-                assertThat(pending.getStatus()).isEqualTo(AccountStatus.PENDING_EMAIL);
-                assertThat(pending.getRole()).isEqualTo(UserRole.ORDER_MANAGER);
-                assertThat(pending.getTenantId()).isEqualTo(TENANT_ID);
-                assertThat(passwordEncoder.matches("SecurePassword123!", pending.getPasswordHash())).isTrue();
+                assertThat(pendingIdentity.getStatus()).isEqualTo(IdentityStatus.PENDING_EMAIL);
+                assertThat(passwordEncoder.matches("SecurePassword123!", pendingIdentity.getPasswordHash())).isTrue();
+                assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
+                assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_MANAGER, MembershipStatus.PENDING))
+                                .isEqualTo(1);
                 mockMvc.perform(post("/api/auth/login")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(loginBody(TENANT_ID, email, "SecurePassword123!")))
@@ -171,30 +171,42 @@ class AuthServiceApplicationTests {
                 assertThat(storedCodeHash).isEqualTo(VerificationCodeHasher.hash(code));
                 assertThat(storedCodeHash).isNotEqualTo(code);
 
-                String verifiedPassword = "VerifiedPassword456!";
                 mockMvc.perform(post("/api/auth/verify-email")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(verifyBody(email, code, verifiedPassword)))
+                                .content(verifyBody(email, code, "SecurePassword123!")))
                                 .andExpect(status().isNoContent());
+
+                assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
+                                .isEqualTo(IdentityStatus.VERIFIED);
+                assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_MANAGER, MembershipStatus.PENDING))
+                                .isEqualTo(1);
+                assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
+
+                mockMvc.perform(post("/api/auth/memberships")
+                                .header("Authorization", "Bearer " + createTenantAdminToken(TENANT_ID))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(membershipBody(TENANT_ID, email, UserRole.ORDER_MANAGER)))
+                                .andExpect(status().isCreated())
+                                .andExpect(jsonPath("$.status").value("ACTIVE"));
 
                 UserAccount activated = userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)
                                 .orElseThrow();
-                assertThat(activated.getStatus())
-                                .isEqualTo(AccountStatus.ACTIVE);
-                assertThat(passwordEncoder.matches(verifiedPassword, activated.getPasswordHash())).isTrue();
-                assertThat(passwordEncoder.matches("SecurePassword123!", activated.getPasswordHash())).isFalse();
-                assertThat(membershipRepository.findAllByNormalizedEmailAndStatusForUpdate(
-                                email, MembershipStatus.ACTIVE)).hasSize(1);
+                assertThat(activated.getStatus()).isEqualTo(AccountStatus.ACTIVE);
+                assertThat(activated.getRole()).isEqualTo(UserRole.ORDER_MANAGER);
+                assertThat(activated.getTenantId()).isEqualTo(TENANT_ID);
+                assertThat(passwordEncoder.matches("SecurePassword123!", activated.getPasswordHash())).isTrue();
+                assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_MANAGER, MembershipStatus.ACTIVE))
+                                .isEqualTo(1);
 
                 mockMvc.perform(post("/api/auth/login")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(loginBody(TENANT_ID, email, verifiedPassword)))
+                                .content(loginBody(TENANT_ID, email, "SecurePassword123!")))
                                 .andExpect(status().isOk())
                                 .andExpect(jsonPath("$.accessToken").isNotEmpty());
 
                 mockMvc.perform(post("/api/auth/login")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(loginBody(OTHER_TENANT_ID, email, verifiedPassword)))
+                                .content(loginBody(OTHER_TENANT_ID, email, "SecurePassword123!")))
                                 .andExpect(status().isUnauthorized());
         }
 
@@ -209,12 +221,11 @@ class AuthServiceApplicationTests {
                 mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON).content(body))
                                 .andExpect(status().isAccepted());
 
-                assertThat(userAccountRepository.findAll().stream()
-                                .filter(account -> email.equals(account.getNormalizedEmail())))
-                                .hasSize(1);
                 ArgumentCaptor<String> codes = ArgumentCaptor.forClass(String.class);
                 verify(emailSender, org.mockito.Mockito.times(2))
                                 .sendVerificationCode(org.mockito.ArgumentMatchers.eq(email), codes.capture());
+                assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
+                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
 
                 mockMvc.perform(post("/api/auth/verify-email")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -286,10 +297,28 @@ class AuthServiceApplicationTests {
                                 .content(verifyBody(email, "0".repeat(64), "SecurePassword123!")))
                                 .andExpect(status().isBadRequest());
 
-                assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email))
-                                .get()
-                                .extracting(UserAccount::getStatus)
-                                .isEqualTo(AccountStatus.PENDING_EMAIL);
+                assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
+                assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
+                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
+                assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_VIEWER, MembershipStatus.PENDING))
+                                .isEqualTo(1);
+        }
+
+        private int countMembership(UUID tenantId, String email, UserRole role, MembershipStatus status) {
+                return jdbcTemplate.queryForObject(
+                                """
+                                                SELECT COUNT(*)
+                                                FROM public.tenant_memberships
+                                                WHERE tenant_id = ?
+                                                  AND normalized_email = ?
+                                                  AND role = ?
+                                                  AND status = ?
+                                                """,
+                                Integer.class,
+                                tenantId,
+                                email,
+                                role.name(),
+                                status.name());
         }
 
         private void createPendingMembership(UUID tenantId, String email, UserRole role) throws Exception {
