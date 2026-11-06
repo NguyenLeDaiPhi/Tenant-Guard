@@ -1,0 +1,189 @@
+classDiagram
+direction LR
+
+namespace com.authservice.api {
+  class AuthController {
+    -registrationService: RegistrationService
+    +register(request: RegisterRequest, httpRequest: HttpServletRequest): ResponseEntity~RegistrationAcceptedResponse~
+  }
+  class EmailVerificationController {
+    -emailVerificationService: EmailVerificationService
+    +verifyEmail(request: VerifyEmailRequest, httpRequest: HttpServletRequest): ResponseEntity~Void~
+  }
+  class RegisterRequest {
+    -email: String
+    -password: String
+  }
+  class VerifyEmailRequest {
+    -email: String
+    -code: String
+  }
+  class RegistrationAcceptedResponse {
+    -message: String
+    +generic(): RegistrationAcceptedResponse$
+  }
+}
+
+namespace com.authservice.service {
+  class RegistrationService {
+    -challengeService: RegistrationChallengeService
+    -emailSender: VerificationEmailSender
+    -rateLimiter: RegistrationRateLimiter
+    +register(rawEmail: String, rawPassword: String, clientIp: String): void
+  }
+  class RegistrationChallengeService {
+    -SECURE_RANDOM: SecureRandom$
+    -identityRepository: UserIdentityRepository
+    -verificationRepository: EmailVerificationCodeRepository
+    -userAccountRepository: UserAccountRepository
+    -passwordEncoder: PasswordEncoder
+    -jdbcTemplate: JdbcTemplate
+    -verificationTtl: Duration
+    +prepare(emailAddress: EmailAddress, rawPassword: String): Optional
+    -acquireRegistrationLock(normalizedEmail: String): void
+    -generateCode(): String$
+  }
+  class EmailVerificationService {
+    -CODE_FORMAT: Pattern$
+    -verificationRepository: EmailVerificationCodeRepository
+    -identityRepository: UserIdentityRepository
+    -rateLimiter: RegistrationRateLimiter
+    +verify(rawEmail: String, code: String, clientIp: String): boolean
+    +deleteExpiredChallenges(): void
+  }
+  class RegistrationChallengeService_VerificationChallenge["RegistrationChallengeService.VerificationChallenge"] {
+    -recipientEmail: String
+    -code: String
+  }
+  class VerificationEmailSender {
+    <<interface>>
+    +sendVerificationCode(email: String, code: String): void
+  }
+  class SmtpVerificationEmailSender {
+    -mailSender: JavaMailSender
+    -fromAddress: String
+    -verificationTtl: Duration
+    +sendVerificationCode(email: String, code: String): void
+  }
+  class RegistrationRateLimiter {
+    -WINDOW: Duration$
+    -rateLimitService: RateLimitService
+    +checkRegistration(clientIp: String, normalizedEmail: String): void
+    +checkVerification(clientIp: String, normalizedEmail: String): void
+    -enforce(scope: String, subject: String, maximum: int): void
+  }
+  class RateLimitService {
+    -jdbcTemplate: JdbcTemplate
+    +consume(scope: String, subject: String, window: Duration): int
+    +deleteExpiredBuckets(): void
+  }
+  class VerificationCodeHasher {
+    <<final>>
+    -VerificationCodeHasher()
+    +hash(code: String): String$
+    +matches(expectedHash: String, code: String): boolean$
+  }
+  class PasswordPolicy {
+    <<final>>
+    ~MIN_LENGTH: int$
+    ~MAX_BCRYPT_BYTES: int$
+    ~validate(rawPassword: String): void$
+  }
+  class EmailAddress {
+    -raw: String
+    -normalized: String
+    +of(email: String): EmailAddress$
+    +normalize(email: String): String$
+  }
+}
+
+namespace com.authservice.persistence {
+  class UserIdentity {
+    -id: UUID
+    -email: String
+    -normalizedEmail: String
+    -passwordHash: String
+    -status: IdentityStatus
+    -emailVerifiedAt: Instant
+    +isVerified(): boolean
+    +verify(now: Instant): void
+  }
+  class EmailVerificationCode {
+    +MAX_FAILED_ATTEMPTS: int$
+    -id: UUID
+    -normalizedEmail: String
+    -identityId: UUID
+    -codeHash: String
+    -expiresAt: Instant
+    -failedAttempts: int
+    -consumedAt: Instant
+    +isUsable(now: Instant): boolean
+    +recordFailedAttempt(now: Instant): void
+    +consume(now: Instant): void
+  }
+  class UserIdentityRepository {
+    <<interface>>
+    +findByNormalizedEmailForUpdate(normalizedEmail: String): Optional
+    +findByNormalizedEmail(normalizedEmail: String): Optional
+  }
+  class EmailVerificationCodeRepository {
+    <<interface>>
+    +findAllActiveByNormalizedEmailForUpdate(normalizedEmail: String): List
+    +findAllActiveByIdentityIdForUpdate(identityId: UUID): List
+    +deleteExpiredOrConsumedBefore(cutoff: Instant): int
+  }
+  class UserAccountRepository {
+    <<interface>>
+    +findAllByNormalizedEmail(normalizedEmail: String): List
+  }
+  class UserAccount {
+    -id: UUID
+    -normalizedEmail: String
+    -status: AccountStatus
+  }
+}
+
+class PasswordEncoder {
+  <<interface>>
+}
+class JavaMailSender {
+  <<interface>>
+}
+class JdbcTemplate
+
+AuthController --> RegistrationService
+AuthController ..> RegisterRequest
+AuthController ..> RegistrationAcceptedResponse
+EmailVerificationController --> EmailVerificationService
+EmailVerificationController ..> VerifyEmailRequest
+RegistrationService --> RegistrationChallengeService
+RegistrationService --> VerificationEmailSender
+RegistrationService --> RegistrationRateLimiter
+RegistrationService ..> PasswordPolicy
+RegistrationService ..> EmailAddress
+RegistrationChallengeService --> UserIdentityRepository
+RegistrationChallengeService --> EmailVerificationCodeRepository
+RegistrationChallengeService --> UserAccountRepository
+RegistrationChallengeService ..> PasswordEncoder
+RegistrationChallengeService ..> JdbcTemplate
+RegistrationChallengeService ..> VerificationCodeHasher
+RegistrationChallengeService ..> RegistrationChallengeService_VerificationChallenge
+RegistrationChallengeService ..> UserIdentity
+RegistrationChallengeService ..> EmailVerificationCode
+RegistrationChallengeService ..> UserAccount
+EmailVerificationService --> UserIdentityRepository
+EmailVerificationService --> EmailVerificationCodeRepository
+EmailVerificationService --> RegistrationRateLimiter
+EmailVerificationService ..> VerificationCodeHasher
+EmailVerificationService ..> UserIdentity
+EmailVerificationService ..> EmailVerificationCode
+VerificationEmailSender <|.. SmtpVerificationEmailSender
+SmtpVerificationEmailSender --> JavaMailSender
+RegistrationRateLimiter --> RateLimitService
+RateLimitService --> JdbcTemplate
+UserIdentityRepository ..> UserIdentity
+EmailVerificationCodeRepository ..> EmailVerificationCode
+UserAccountRepository ..> UserAccount
+
+note for EmailVerificationCode "identityId is a UUID scalar; the entity has no JPA object association."
+note for RegistrationService "Registration creates/reuses an identity challenge; tenant membership is not required here."

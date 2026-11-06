@@ -1,0 +1,294 @@
+classDiagram
+direction LR
+
+namespace com.authservice.api {
+  class AuthController {
+    -authenticationManager: AuthenticationManager
+    -accessTokenService: AccessTokenService
+    -registrationService: RegistrationService
+    +login(request: LoginRequest): ResponseEntity~AccessTokenResponse~
+    +register(request: RegisterRequest, httpRequest: HttpServletRequest): ResponseEntity~RegistrationAcceptedResponse~
+  }
+  class GoogleIdentityController {
+    -externalIdentityService: ExternalIdentityService
+    +linkGoogleIdentity(jwt: Jwt, request: LinkGoogleRequest): ResponseEntity~ExternalIdentityResponse~
+  }
+  class JwksController {
+    -jwkSet: JWKSet
+    +jwks(): Map
+  }
+  class LoginRequest {
+    -tenantId: UUID
+    -email: String
+    -password: String
+  }
+  class AccessTokenResponse {
+    -accessToken: String
+    -tokenType: String
+    -expiresIn: long
+  }
+}
+
+namespace com.authservice.security {
+  class SecurityConfiguration {
+    -apiSecurityErrorHandler: ApiSecurityErrorHandler
+    -googleOidcAuthenticationHandler: GoogleOidcAuthenticationHandler
+    +passwordEncoder(): PasswordEncoder
+    +authenticationManager(config: AuthenticationConfiguration): AuthenticationManager
+    +securityFilterChain(http: HttpSecurity, provider: PasswordAuthenticationProvider, repositories: ObjectProvider): SecurityFilterChain
+    +jwtAuthenticationConverter(): JwtAuthenticationConverter
+  }
+  class PasswordAuthenticationProvider {
+    -userAccountRepository: UserAccountRepository
+    -tenantStatusService: TenantStatusService
+    -passwordEncoder: PasswordEncoder
+    +authenticate(authentication: Authentication): Authentication
+    +supports(authentication: Class): boolean
+  }
+  class PasswordAuthenticationToken {
+    -principal: Object
+    -credentials: Object
+    -tenantId: UUID
+    -email: String
+    +PasswordAuthenticationToken(tenantId: UUID, email: String, credentials: Object)
+    +PasswordAuthenticationToken(principal: Object, credentials: Object, tenantId: UUID, email: String, authorities: Collection): void
+    +getTenantId(): UUID
+    +getEmail(): String
+    +getCredentials(): Object
+    +getPrincipal(): Object
+    +eraseCredentials(): void
+  }
+  class UserAccountPrincipal {
+    -id: UUID
+    -tenantId: UUID
+    -email: String
+    -passwordHash: String
+    -role: UserRole
+    -status: AccountStatus
+    -lockedUntil: Instant
+    +getId(): UUID
+    +getTenantId(): UUID
+    +getRole(): UserRole
+    +toAuthenticatedIdentity(): AuthenticatedIdentity
+    +getAuthorities(): Collection
+    +getPassword(): String
+    +getUsername(): String
+    +isAccountNonExpired(): boolean
+    +isAccountNonLocked(): boolean
+    +isCredentialsNonExpired(): boolean
+    +isEnabled(): boolean
+  }
+  class ApiSecurityErrorHandler {
+    +commence(request: HttpServletRequest, response: HttpServletResponse, exception: AuthenticationException): void
+    +handle(request: HttpServletRequest, response: HttpServletResponse, exception: AccessDeniedException): void
+    -escapeJson(input: String): String
+  }
+  class GoogleOidcAuthenticationHandler {
+    -externalIdentityService: ExternalIdentityService
+    -accessTokenService: AccessTokenService
+    +onAuthenticationSuccess(request: HttpServletRequest, response: HttpServletResponse, authentication: Authentication): void
+    -sendError(response: HttpServletResponse, path: String, status: HttpStatus, message: String): void
+    -escapeJson(input: String): String
+  }
+}
+
+namespace com.authservice.service {
+  class AccessTokenService {
+    -jwtEncoder: JwtEncoder
+    -properties: JwtProperties
+    +generateAccessToken(identity: AuthenticatedIdentity): IssuedAccessToken
+  }
+  class AccessTokenService_IssuedAccessToken["AccessTokenService.IssuedAccessToken"] {
+    -token: String
+    -expiresIn: Duration
+  }
+  class ExternalIdentityService {
+    +PROVIDER_GOOGLE: String$
+    -externalIdentityRepository: ExternalIdentityRepository
+    -userAccountRepository: UserAccountRepository
+    -tenantStatusService: TenantStatusService
+    +authenticateGoogleIdentity(providerSubject: String): AuthenticatedIdentity
+    +linkIdentity(userId: UUID, provider: String, providerSubject: String, emailVerified: boolean): ExternalIdentity
+  }
+}
+
+namespace com.authservice.config {
+  class JwtConfiguration {
+    -properties: JwtProperties
+    -privateKey: RSAPrivateKey
+    -publicKey: RSAPublicKey
+    -rsaKey: RSAKey
+    +rsaPrivateKey(): RSAPrivateKey
+    +rsaPublicKey(): RSAPublicKey
+    +rsaKey(): RSAKey
+    +jwkSet(): JWKSet
+    +jwtEncoder(): JwtEncoder
+    +jwtDecoder(): JwtDecoder
+  }
+  class JwtProperties {
+    -issuer: String
+    -audience: String
+    -accessTokenTtl: Duration
+    -keyId: String
+    -privateKeyBase64: String
+    -publicKeyBase64: String
+  }
+}
+
+namespace com.authservice.domain {
+  class AuthenticatedIdentity {
+    <<record>>
+    -userId: UUID
+    -tenantId: UUID
+    -role: UserRole
+    -email: String
+  }
+  class UserRole {
+    <<enumeration>>
+    PLATFORM_ADMIN
+    TENANT_ADMIN
+    ORDER_MANAGER
+    ORDER_VIEWER
+    +isPlatformRole(): boolean
+    +isTenantRole(): boolean
+  }
+  class AccountStatus {
+    <<enumeration>>
+    PENDING_EMAIL
+    ACTIVE
+    LOCKED
+    DISABLED
+  }
+}
+
+namespace com.authservice.persistence {
+  class UserAccount {
+    -id: UUID
+    -tenantId: UUID
+    -email: String
+    -normalizedEmail: String
+    -passwordHash: String
+    -role: UserRole
+    -status: AccountStatus
+    -failedLoginCount: int
+    -lockedUntil: Instant
+    +isAvailable(now: Instant): boolean
+    +recordFailedLogin(now: Instant): void
+    +recordSuccessfulLogin(now: Instant): void
+  }
+  class UserAccountRepository {
+    <<interface>>
+  }
+  class ExternalIdentityRepository {
+    <<interface>>
+  }
+  class ExternalIdentity {
+    -id: UUID
+    -userId: UUID
+    -provider: String
+    -providerSubject: String
+    -emailVerified: boolean
+    -linkedAt: Instant
+  }
+}
+
+class AbstractAuthenticationToken {
+  <<abstract>>
+}
+class Authentication {
+  <<interface>>
+}
+class AuthenticationManager {
+  <<interface>>
+}
+class AuthenticationProvider {
+  <<interface>>
+}
+class AuthenticationSuccessHandler {
+  <<interface>>
+}
+class AuthenticationEntryPoint {
+  <<interface>>
+}
+class AccessDeniedHandler {
+  <<interface>>
+}
+class UserDetails {
+  <<interface>>
+}
+class GrantedAuthority {
+  <<interface>>
+}
+class PasswordEncoder {
+  <<interface>>
+}
+class JwtEncoder {
+  <<interface>>
+}
+class JwtDecoder {
+  <<interface>>
+}
+class Jwt
+class JWKSet
+class RSAKey
+class SecurityFilterChain
+class OidcUser {
+  <<interface>>
+}
+class OAuth2User {
+  <<interface>>
+}
+class TenantStatusService {
+  +validateTenantActive(tenantId: UUID): void
+  +isTenantActive(tenantId: UUID): boolean
+}
+
+AbstractAuthenticationToken <|-- PasswordAuthenticationToken
+AuthenticationProvider <|.. PasswordAuthenticationProvider
+UserDetails <|.. UserAccountPrincipal
+AuthenticationEntryPoint <|.. ApiSecurityErrorHandler
+AccessDeniedHandler <|.. ApiSecurityErrorHandler
+AuthenticationSuccessHandler <|.. GoogleOidcAuthenticationHandler
+UserAccountRepository ..> UserAccount
+ExternalIdentityRepository ..> ExternalIdentity
+AuthController --> AuthenticationManager
+AuthController ..> LoginRequest
+AuthController ..> PasswordAuthenticationToken
+AuthController ..> UserAccountPrincipal
+AuthController --> AccessTokenService
+AuthController ..> AccessTokenResponse
+PasswordAuthenticationProvider --> UserAccountRepository
+PasswordAuthenticationProvider --> TenantStatusService
+PasswordAuthenticationProvider --> PasswordEncoder
+PasswordAuthenticationProvider ..> UserAccountPrincipal
+PasswordAuthenticationProvider ..> UserAccount
+UserAccountPrincipal ..> UserAccount
+UserAccountPrincipal ..> AuthenticatedIdentity
+UserAccountPrincipal ..> UserRole
+UserAccountPrincipal ..> AccountStatus
+SecurityConfiguration --> PasswordAuthenticationProvider
+SecurityConfiguration --> ApiSecurityErrorHandler
+SecurityConfiguration --> GoogleOidcAuthenticationHandler
+SecurityConfiguration ..> AuthenticationManager
+SecurityConfiguration ..> PasswordEncoder
+SecurityConfiguration ..> SecurityFilterChain
+GoogleIdentityController --> ExternalIdentityService
+GoogleIdentityController ..> Jwt
+GoogleOidcAuthenticationHandler --> ExternalIdentityService
+GoogleOidcAuthenticationHandler --> AccessTokenService
+GoogleOidcAuthenticationHandler ..> Authentication
+ExternalIdentityService --> ExternalIdentityRepository
+ExternalIdentityService --> UserAccountRepository
+ExternalIdentityService ..> AuthenticatedIdentity
+AccessTokenService --> JwtEncoder
+AccessTokenService --> JwtProperties
+AccessTokenService ..> AuthenticatedIdentity
+AccessTokenService ..> AccessTokenService_IssuedAccessToken
+JwtConfiguration --> JwtProperties
+JwtConfiguration ..> RSAKey
+JwtConfiguration ..> JWKSet
+JwtConfiguration ..> JwtEncoder
+JwtConfiguration ..> JwtDecoder
+JwksController --> JWKSet
+GoogleOidcAuthenticationHandler ..> OidcUser
+GoogleOidcAuthenticationHandler ..> OAuth2User

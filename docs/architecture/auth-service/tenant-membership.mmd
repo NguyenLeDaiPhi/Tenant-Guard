@@ -1,0 +1,182 @@
+classDiagram
+direction LR
+
+namespace com.authservice.api {
+  class MembershipController {
+    -membershipService: MembershipService
+    +createMembership(jwt: Jwt, request: CreateMembershipRequest): ResponseEntity~MembershipResponse~
+  }
+  class CreateMembershipRequest {
+    -tenantId: UUID
+    -email: String
+    -role: UserRole
+  }
+  class MembershipResponse {
+    -membershipId: UUID
+    -tenantId: UUID
+    -email: String
+    -role: UserRole
+    -status: MembershipStatus
+  }
+}
+
+namespace com.authservice.service {
+  class MembershipService {
+    -membershipRepository: TenantMembershipRepository
+    -userAccountRepository: UserAccountRepository
+    -identityRepository: UserIdentityRepository
+    -tenantStatusService: TenantStatusService
+    -jdbcTemplate: JdbcTemplate
+    +createPendingMembership(creatorId: UUID, creatorRole: UserRole, creatorTenantId: UUID, targetTenantId: UUID, email: String, assignedRole: UserRole): TenantMembership
+    -activateMembership(membership: TenantMembership, identity: UserIdentity, email: String): TenantMembership
+    -createActiveAccount(tenantId: UUID, email: String, normalizedEmail: String, role: UserRole, identity: UserIdentity, now: Instant): UserAccount$
+    -acquireProvisioningLock(tenantId: UUID, normalizedEmail: String): void
+  }
+  class TenantStatusService {
+    -tenantStatusRepository: TenantStatusRepository
+    +validateTenantActive(tenantId: UUID): void
+    +isTenantActive(tenantId: UUID): boolean
+  }
+  class AccountAlreadyExistsException {
+    +AccountAlreadyExistsException(message: String)
+  }
+  class TenantUnavailableException {
+    +TenantUnavailableException(message: String)
+  }
+}
+
+namespace com.authservice.persistence {
+  class TenantMembership {
+    -id: UUID
+    -tenantId: UUID
+    -normalizedEmail: String
+    -role: UserRole
+    -status: MembershipStatus
+    -userId: UUID
+    -createdBy: UUID
+    -createdAt: Instant
+    -activatedAt: Instant
+    +activate(now: Instant): void
+  }
+  class UserAccount {
+    -id: UUID
+    -tenantId: UUID
+    -identityId: UUID
+    -normalizedEmail: String
+    -passwordHash: String
+    -role: UserRole
+    -status: AccountStatus
+    +isAvailable(now: Instant): boolean
+  }
+  class UserIdentity {
+    -id: UUID
+    -normalizedEmail: String
+    -passwordHash: String
+    -status: IdentityStatus
+    -emailVerifiedAt: Instant
+    +isVerified(): boolean
+  }
+  class TenantStatus {
+    -id: UUID
+    -slug: String
+    -status: String
+    +isActive(): boolean
+  }
+  class TenantMembershipRepository {
+    <<interface>>
+    +existsByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): boolean
+    +findByTenantIdAndNormalizedEmailForUpdate(tenantId: UUID, normalizedEmail: String): Optional
+    +findAllByNormalizedEmailAndStatusForUpdate(normalizedEmail: String, status: MembershipStatus): List
+  }
+  class UserAccountRepository {
+    <<interface>>
+    +findByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): Optional
+    +existsByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): boolean
+  }
+  class UserIdentityRepository {
+    <<interface>>
+    +findByNormalizedEmailForUpdate(normalizedEmail: String): Optional
+  }
+  class TenantStatusRepository {
+    -jdbcTemplate: JdbcTemplate
+    +findById(tenantId: UUID): Optional
+    +existsByIdAndStatus(id: UUID, status: String): boolean
+  }
+}
+
+namespace com.authservice.domain {
+  class MembershipStatus {
+    <<enumeration>>
+    PENDING
+    ACTIVE
+  }
+  class AccountStatus {
+    <<enumeration>>
+    PENDING_EMAIL
+    ACTIVE
+    LOCKED
+    DISABLED
+  }
+  class IdentityStatus {
+    <<enumeration>>
+    PENDING_EMAIL
+    VERIFIED
+  }
+  class UserRole {
+    <<enumeration>>
+    PLATFORM_ADMIN
+    TENANT_ADMIN
+    ORDER_MANAGER
+    ORDER_VIEWER
+    +isPlatformRole(): boolean
+    +isTenantRole(): boolean
+  }
+  class EmailAddress {
+    -raw: String
+    -normalized: String
+    +of(email: String): EmailAddress$
+  }
+}
+
+class JdbcTemplate
+class Jwt
+class AccessDeniedException
+class JpaRepository {
+  <<interface>>
+}
+
+JpaRepository <|.. TenantMembershipRepository
+JpaRepository <|.. UserAccountRepository
+JpaRepository <|.. UserIdentityRepository
+MembershipController --> MembershipService
+MembershipController ..> Jwt
+MembershipController ..> CreateMembershipRequest
+MembershipController ..> MembershipResponse
+MembershipController ..> TenantMembership
+MembershipService --> TenantMembershipRepository
+MembershipService --> UserAccountRepository
+MembershipService --> UserIdentityRepository
+MembershipService --> TenantStatusService
+MembershipService ..> JdbcTemplate
+MembershipService ..> AccessDeniedException
+MembershipService ..> AccountAlreadyExistsException
+MembershipService ..> EmailAddress
+MembershipService ..> TenantMembership
+MembershipService ..> UserAccount
+MembershipService ..> UserIdentity
+TenantStatusService --> TenantStatusRepository
+TenantStatusService ..> TenantUnavailableException
+TenantStatusRepository --> JdbcTemplate
+TenantStatusRepository ..> TenantStatus
+TenantMembershipRepository ..> TenantMembership
+UserAccountRepository ..> UserAccount
+UserIdentityRepository ..> UserIdentity
+TenantMembership ..> MembershipStatus
+TenantMembership ..> UserRole
+UserAccount ..> AccountStatus
+UserAccount ..> UserRole
+UserIdentity ..> IdentityStatus
+
+note for MembershipService "Only a TENANT_ADMIN can provision within the same tenant; role must be a tenant role. A verified identity permits activation."
+note for TenantMembership "userId is a UUID scalar, not a JPA object association."
+note for UserAccount "tenantId and identityId are UUID scalar fields, not JPA object associations."

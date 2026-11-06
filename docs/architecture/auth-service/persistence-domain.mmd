@@ -1,0 +1,197 @@
+classDiagram
+direction LR
+
+namespace com.authservice.persistence {
+  class UserAccount {
+    +MAX_FAILED_ATTEMPTS: int$
+    +LOCK_DURATION: Duration$
+    -id: UUID
+    -tenantId: UUID
+    -identityId: UUID
+    -email: String
+    -normalizedEmail: String
+    -passwordHash: String
+    -role: UserRole
+    -status: AccountStatus
+    -failedLoginCount: int
+    -lockedUntil: Instant
+    -lastLoginAt: Instant
+    -createdAt: Instant
+    -updatedAt: Instant
+    #onCreate(): void
+    #onUpdate(): void
+    +isAccountNonLocked(now: Instant): boolean
+    +isAvailable(now: Instant): boolean
+    +recordFailedLogin(now: Instant): void
+    +recordSuccessfulLogin(now: Instant): void
+  }
+  class UserIdentity {
+    -id: UUID
+    -email: String
+    -normalizedEmail: String
+    -passwordHash: String
+    -status: IdentityStatus
+    -createdAt: Instant
+    -updatedAt: Instant
+    -emailVerifiedAt: Instant
+    #onCreate(): void
+    #onUpdate(): void
+    +isVerified(): boolean
+    +verify(now: Instant): void
+  }
+  class TenantMembership {
+    -id: UUID
+    -tenantId: UUID
+    -normalizedEmail: String
+    -role: UserRole
+    -status: MembershipStatus
+    -userId: UUID
+    -createdBy: UUID
+    -createdAt: Instant
+    -activatedAt: Instant
+    #onCreate(): void
+    +activate(now: Instant): void
+  }
+  class EmailVerificationCode {
+    +MAX_FAILED_ATTEMPTS: int$
+    -id: UUID
+    -normalizedEmail: String
+    -identityId: UUID
+    -codeHash: String
+    -createdAt: Instant
+    -expiresAt: Instant
+    -failedAttempts: int
+    -consumedAt: Instant
+    #onCreate(): void
+    +isUsable(now: Instant): boolean
+    +recordFailedAttempt(now: Instant): void
+    +consume(now: Instant): void
+  }
+  class ExternalIdentity {
+    -id: UUID
+    -userId: UUID
+    -provider: String
+    -providerSubject: String
+    -emailVerified: boolean
+    -linkedAt: Instant
+    #onCreate(): void
+  }
+  class TenantStatus {
+    -id: UUID
+    -slug: String
+    -status: String
+    +isActive(): boolean
+  }
+  class UserAccountRepository {
+    <<interface>>
+    +findByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): Optional
+    +findByNormalizedEmailAndTenantIdIsNull(normalizedEmail: String): Optional
+    +existsByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): boolean
+    +existsByTenantIdAndRole(tenantId: UUID, role: UserRole): boolean
+    +findAllByNormalizedEmail(normalizedEmail: String): List
+    +existsByNormalizedEmailAndTenantIdIsNull(normalizedEmail: String): boolean
+  }
+  class UserIdentityRepository {
+    <<interface>>
+    +findByNormalizedEmailForUpdate(normalizedEmail: String): Optional
+    +findByNormalizedEmail(normalizedEmail: String): Optional
+  }
+  class TenantMembershipRepository {
+    <<interface>>
+    +existsByTenantIdAndNormalizedEmail(tenantId: UUID, normalizedEmail: String): boolean
+    +findByTenantIdAndNormalizedEmailForUpdate(tenantId: UUID, normalizedEmail: String): Optional
+    +findAllByNormalizedEmailAndStatusForUpdate(normalizedEmail: String, status: MembershipStatus): List
+  }
+  class EmailVerificationCodeRepository {
+    <<interface>>
+    +findAllActiveByNormalizedEmailForUpdate(normalizedEmail: String): List
+    +findAllActiveByIdentityIdForUpdate(identityId: UUID): List
+    +deleteExpiredOrConsumedBefore(cutoff: Instant): int
+  }
+  class ExternalIdentityRepository {
+    <<interface>>
+    +findByProviderAndProviderSubject(provider: String, providerSubject: String): Optional
+    +findByUserIdAndProvider(userId: UUID, provider: String): List
+    +existsByProviderAndProviderSubject(provider: String, providerSubject: String): boolean
+  }
+  class TenantStatusRepository {
+    -FIND_BY_ID_SQL: String$
+    -jdbcTemplate: JdbcTemplate
+    +findById(tenantId: UUID): Optional
+    +existsByIdAndStatus(id: UUID, status: String): boolean
+  }
+}
+
+namespace com.authservice.domain {
+  class AccountStatus {
+    <<enumeration>>
+    PENDING_EMAIL
+    ACTIVE
+    LOCKED
+    DISABLED
+  }
+  class IdentityStatus {
+    <<enumeration>>
+    PENDING_EMAIL
+    VERIFIED
+  }
+  class MembershipStatus {
+    <<enumeration>>
+    PENDING
+    ACTIVE
+  }
+  class UserRole {
+    <<enumeration>>
+    PLATFORM_ADMIN
+    TENANT_ADMIN
+    ORDER_MANAGER
+    ORDER_VIEWER
+    +isPlatformRole(): boolean
+    +isTenantRole(): boolean
+  }
+  class AuthenticatedIdentity {
+    <<record>>
+    -userId: UUID
+    -tenantId: UUID
+    -role: UserRole
+    -email: String
+  }
+  class EmailAddress {
+    <<record>>
+    -raw: String
+    -normalized: String
+    -BASIC_EMAIL_PATTERN: Pattern$
+    +of(email: String): EmailAddress$
+    +normalize(email: String): String$
+  }
+}
+
+class JpaRepository {
+  <<interface>>
+}
+class JdbcTemplate
+
+JpaRepository <|.. UserAccountRepository
+JpaRepository <|.. UserIdentityRepository
+JpaRepository <|.. TenantMembershipRepository
+JpaRepository <|.. EmailVerificationCodeRepository
+JpaRepository <|.. ExternalIdentityRepository
+UserAccountRepository ..> UserAccount
+UserIdentityRepository ..> UserIdentity
+TenantMembershipRepository ..> TenantMembership
+EmailVerificationCodeRepository ..> EmailVerificationCode
+ExternalIdentityRepository ..> ExternalIdentity
+TenantStatusRepository --> JdbcTemplate
+TenantStatusRepository ..> TenantStatus
+UserAccount ..> AccountStatus
+UserAccount ..> UserRole
+UserIdentity ..> IdentityStatus
+TenantMembership ..> MembershipStatus
+TenantMembership ..> UserRole
+AuthenticatedIdentity ..> UserRole
+
+note for UserAccount "tenantId and identityId are scalar UUID columns; no JPA entity relationship is declared."
+note for TenantMembership "userId is a scalar UUID column; no JPA entity relationship is declared."
+note for EmailVerificationCode "identityId is a scalar UUID column; no JPA entity relationship is declared."
+note for ExternalIdentity "userId is a scalar UUID column; no JPA entity relationship is declared."
+note for JpaRepository "Repository interfaces extend Spring Data JpaRepository; inherited CRUD operations are omitted."

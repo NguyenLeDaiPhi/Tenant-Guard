@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tenantguard-postgres
+    environment:
+      POSTGRES_DB: tenantguard
+      POSTGRES_USER: ${POSTGRES_USER:-auth_service}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d tenantguard" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  tenant-schema-bootstrap:
+    image: postgres:16-alpine
+    container_name: tenantguard-tenant-schema-bootstrap
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: tenantguard
+      PGUSER: ${POSTGRES_USER:-auth_service}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
+      AUTH_DB_USER: ${DB_USERNAME:-auth_service_app}
+      AUTH_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the environment}
+    volumes:
+      - ./infrastructure/docker/postgres/tenant-registry-bootstrap.sql:/tenant-registry-bootstrap.sql:ro
+    command:
+      - sh
+      - -c
+      - >-
+        psql --set=ON_ERROR_STOP=1 --set=auth_user="$$AUTH_DB_USER" --set=auth_password="$$AUTH_DB_PASSWORD" --file=/tenant-registry-bootstrap.sql
+    restart: "no"
+
+  # Local email testing. Not used by default.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: tenantguard-mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    profiles:
+      - local-mail
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: tenantguard-auth-service
+    ports:
+      - "8081:8081"
+      - "9090:9090"
+    environment:
+      SERVER_PORT: 8081
+
+      DATABASE_URL: jdbc:postgresql://postgres:5432/tenantguard
+      DB_USERNAME: ${DB_USERNAME:-auth_service_app}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the environment}
+
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-http://localhost:8081}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-tenantguard-api}
+      AUTH_JWT_KEY_ID: ${AUTH_JWT_KEY_ID:-tenantguard-local}
+      AUTH_JWT_ACCESS_TOKEN_TTL: ${AUTH_JWT_ACCESS_TOKEN_TTL:-PT10M}
+      AUTH_JWT_PRIVATE_KEY_BASE64: ${AUTH_JWT_PRIVATE_KEY_BASE64:?Set AUTH_JWT_PRIVATE_KEY_BASE64 in the environment}
+      AUTH_JWT_PUBLIC_KEY_BASE64: ${AUTH_JWT_PUBLIC_KEY_BASE64:?Set AUTH_JWT_PUBLIC_KEY_BASE64 in the environment}
+
+      AUTH_BOOTSTRAP_TENANT_ADMIN_ENABLED: ${AUTH_BOOTSTRAP_TENANT_ADMIN_ENABLED:-false}
+      AUTH_BOOTSTRAP_TENANT_ID: ${AUTH_BOOTSTRAP_TENANT_ID:-}
+      AUTH_BOOTSTRAP_ADMIN_EMAIL: ${AUTH_BOOTSTRAP_ADMIN_EMAIL:-}
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-}
+
+      # Gmail SMTP
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:?Set MAIL_USERNAME in .env}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
+      MAIL_SMTP_AUTH: "true"
+      MAIL_SMTP_STARTTLS: "true"
+      MAIL_FROM: ${MAIL_FROM:-${MAIL_USERNAME}}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tenant-schema-bootstrap:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

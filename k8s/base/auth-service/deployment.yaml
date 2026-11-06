@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: tenantguard-app
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/part-of: tenantguard-oms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: auth-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: auth-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: auth-service
+          image: tenantguard/auth-service:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+            - name: management
+              containerPort: 9090
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          env:
+            - name: SERVER_PORT
+              value: "8081"
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-service-config
+                  key: DATABASE_URL
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-db-credentials
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-db-credentials
+                  key: DB_PASSWORD
+            - name: AUTH_JWT_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-service-config
+                  key: AUTH_JWT_ISSUER
+            - name: AUTH_JWT_AUDIENCE
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-service-config
+                  key: AUTH_JWT_AUDIENCE
+            - name: AUTH_JWT_KEY_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-service-config
+                  key: AUTH_JWT_KEY_ID
+            - name: AUTH_JWT_PRIVATE_KEY_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-jwt-keys
+                  key: AUTH_JWT_PRIVATE_KEY_BASE64
+            - name: AUTH_JWT_PUBLIC_KEY_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: auth-service-jwt-keys
+                  key: AUTH_JWT_PUBLIC_KEY_BASE64
+

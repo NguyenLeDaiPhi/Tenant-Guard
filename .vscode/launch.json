@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "AuthServiceApplication",
+            "request": "launch",
+            "mainClass": "com.authservice.AuthServiceApplication",
+            "projectName": "auth-service"
+        },
+        {
+            "type": "java",
+            "name": "Spring Boot-ServiceApplication<service>",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "mainClass": "com.authservice.service.ServiceApplication",
+            "projectName": "service",
+            "args": "",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

@@ -1,0 +1,241 @@
+classDiagram
+direction LR
+
+namespace com.authservice.api {
+  class AuthController {
+    -authenticationManager: AuthenticationManager
+    -accessTokenService: AccessTokenService
+    -registrationService: RegistrationService
+    +login(request: LoginRequest): ResponseEntity~AccessTokenResponse~
+    +register(request: RegisterRequest, httpRequest: HttpServletRequest): ResponseEntity~RegistrationAcceptedResponse~
+  }
+  class EmailVerificationController {
+    -emailVerificationService: EmailVerificationService
+    +verifyEmail(request: VerifyEmailRequest, httpRequest: HttpServletRequest): ResponseEntity~Void~
+  }
+  class MembershipController {
+    -membershipService: MembershipService
+    +createMembership(jwt: Jwt, request: CreateMembershipRequest): ResponseEntity~MembershipResponse~
+  }
+  class GoogleIdentityController {
+    -externalIdentityService: ExternalIdentityService
+    +linkGoogleIdentity(jwt: Jwt, request: LinkGoogleRequest): ResponseEntity~ExternalIdentityResponse~
+  }
+  class JwksController {
+    -jwkSet: JWKSet
+    +jwks(): Map
+  }
+}
+
+namespace com.authservice.service {
+  class RegistrationService {
+    -challengeService: RegistrationChallengeService
+    -emailSender: VerificationEmailSender
+    -rateLimiter: RegistrationRateLimiter
+    +register(rawEmail: String, rawPassword: String, clientIp: String): void
+  }
+  class RegistrationChallengeService {
+    -identityRepository: UserIdentityRepository
+    -verificationRepository: EmailVerificationCodeRepository
+    -userAccountRepository: UserAccountRepository
+    -passwordEncoder: PasswordEncoder
+    -jdbcTemplate: JdbcTemplate
+    +prepare(emailAddress: EmailAddress, rawPassword: String): Optional
+  }
+  class EmailVerificationService {
+    -verificationRepository: EmailVerificationCodeRepository
+    -identityRepository: UserIdentityRepository
+    -rateLimiter: RegistrationRateLimiter
+    +verify(rawEmail: String, code: String, clientIp: String): boolean
+    +deleteExpiredChallenges(): void
+  }
+  class MembershipService {
+    -membershipRepository: TenantMembershipRepository
+    -userAccountRepository: UserAccountRepository
+    -identityRepository: UserIdentityRepository
+    -tenantStatusService: TenantStatusService
+    +createPendingMembership(creatorId: UUID, creatorRole: UserRole, creatorTenantId: UUID, targetTenantId: UUID, email: String, assignedRole: UserRole): TenantMembership
+  }
+  class ExternalIdentityService {
+    -externalIdentityRepository: ExternalIdentityRepository
+    -userAccountRepository: UserAccountRepository
+    -tenantStatusService: TenantStatusService
+    +authenticateGoogleIdentity(providerSubject: String): AuthenticatedIdentity
+    +linkIdentity(userId: UUID, provider: String, providerSubject: String, emailVerified: boolean): ExternalIdentity
+  }
+  class AccessTokenService {
+    -jwtEncoder: JwtEncoder
+    -properties: JwtProperties
+    +generateAccessToken(identity: AuthenticatedIdentity): IssuedAccessToken
+  }
+  class AccessTokenService_IssuedAccessToken["AccessTokenService.IssuedAccessToken"] {
+    -token: String
+    -expiresIn: Duration
+  }
+  class VerificationEmailSender {
+    <<interface>>
+    +sendVerificationCode(email: String, code: String): void
+  }
+  class SmtpVerificationEmailSender {
+    -mailSender: JavaMailSender
+    -fromAddress: String
+    -verificationTtl: Duration
+    +sendVerificationCode(email: String, code: String): void
+  }
+  class TenantStatusService {
+    -tenantStatusRepository: TenantStatusRepository
+    +validateTenantActive(tenantId: UUID): void
+    +isTenantActive(tenantId: UUID): boolean
+  }
+}
+
+namespace com.authservice.security {
+  class SecurityConfiguration {
+    +passwordEncoder(): PasswordEncoder
+    +authenticationManager(config: AuthenticationConfiguration): AuthenticationManager
+    +securityFilterChain(http: HttpSecurity, provider: PasswordAuthenticationProvider, repositories: ObjectProvider): SecurityFilterChain
+    +jwtAuthenticationConverter(): JwtAuthenticationConverter
+  }
+  class PasswordAuthenticationProvider {
+    -userAccountRepository: UserAccountRepository
+    -tenantStatusService: TenantStatusService
+    -passwordEncoder: PasswordEncoder
+    +authenticate(authentication: Authentication): Authentication
+    +supports(authentication: Class): boolean
+  }
+  class PasswordAuthenticationToken {
+    -principal: Object
+    -credentials: Object
+    -tenantId: UUID
+    -email: String
+  }
+  class UserAccountPrincipal {
+    -id: UUID
+    -tenantId: UUID
+    -email: String
+    -role: UserRole
+    -status: AccountStatus
+    +toAuthenticatedIdentity(): AuthenticatedIdentity
+  }
+  class GoogleOidcAuthenticationHandler {
+    -externalIdentityService: ExternalIdentityService
+    -accessTokenService: AccessTokenService
+    +onAuthenticationSuccess(request: HttpServletRequest, response: HttpServletResponse, authentication: Authentication): void
+  }
+  class ApiSecurityErrorHandler
+}
+
+namespace com.authservice.config {
+  class JwtConfiguration {
+    -properties: JwtProperties
+    -privateKey: RSAPrivateKey
+    -publicKey: RSAPublicKey
+    +jwtEncoder(): JwtEncoder
+    +jwtDecoder(): JwtDecoder
+    +jwkSet(): JWKSet
+  }
+  class JwtProperties {
+    -issuer: String
+    -audience: String
+    -accessTokenTtl: Duration
+    -keyId: String
+    -privateKeyBase64: String
+    -publicKeyBase64: String
+  }
+}
+
+namespace com.authservice.persistence {
+  class UserAccount {
+    -id: UUID
+    -tenantId: UUID
+    -identityId: UUID
+    -email: String
+    -passwordHash: String
+    -role: UserRole
+    -status: AccountStatus
+  }
+  class UserIdentity {
+    -id: UUID
+    -normalizedEmail: String
+    -passwordHash: String
+    -status: IdentityStatus
+  }
+  class TenantMembership {
+    -id: UUID
+    -tenantId: UUID
+    -normalizedEmail: String
+    -role: UserRole
+    -status: MembershipStatus
+    -userId: UUID
+  }
+  class EmailVerificationCode {
+    -id: UUID
+    -identityId: UUID
+    -codeHash: String
+    -expiresAt: Instant
+    -consumedAt: Instant
+  }
+  class ExternalIdentity {
+    -id: UUID
+    -userId: UUID
+    -provider: String
+    -providerSubject: String
+    -emailVerified: boolean
+    -linkedAt: Instant
+  }
+  class UserAccountRepository {
+    <<interface>>
+  }
+  class UserIdentityRepository {
+    <<interface>>
+  }
+  class TenantMembershipRepository {
+    <<interface>>
+  }
+  class EmailVerificationCodeRepository {
+    <<interface>>
+  }
+  class ExternalIdentityRepository {
+    <<interface>>
+  }
+  class TenantStatusRepository
+}
+
+AuthController --> RegistrationService
+AuthController --> AccessTokenService
+EmailVerificationController --> EmailVerificationService
+MembershipController --> MembershipService
+GoogleIdentityController --> ExternalIdentityService
+JwksController --> JWKSet
+RegistrationService --> RegistrationChallengeService
+RegistrationService --> VerificationEmailSender
+RegistrationService ..> RegistrationRateLimiter
+RegistrationChallengeService --> UserIdentityRepository
+RegistrationChallengeService --> EmailVerificationCodeRepository
+RegistrationChallengeService --> UserAccountRepository
+EmailVerificationService --> UserIdentityRepository
+EmailVerificationService --> EmailVerificationCodeRepository
+MembershipService --> TenantMembershipRepository
+MembershipService --> UserAccountRepository
+MembershipService --> UserIdentityRepository
+ExternalIdentityService --> ExternalIdentityRepository
+ExternalIdentityService --> UserAccountRepository
+AccessTokenService --> JwtProperties
+AccessTokenService ..> AccessTokenService_IssuedAccessToken
+TenantStatusService --> TenantStatusRepository
+VerificationEmailSender <|.. SmtpVerificationEmailSender
+SecurityConfiguration --> PasswordAuthenticationProvider
+SecurityConfiguration --> ApiSecurityErrorHandler
+PasswordAuthenticationProvider --> UserAccountRepository
+PasswordAuthenticationProvider --> TenantStatusService
+GoogleOidcAuthenticationHandler --> ExternalIdentityService
+GoogleOidcAuthenticationHandler --> AccessTokenService
+JwtConfiguration --> JwtProperties
+UserAccountRepository ..> UserAccount
+UserIdentityRepository ..> UserIdentity
+TenantMembershipRepository ..> TenantMembership
+EmailVerificationCodeRepository ..> EmailVerificationCode
+ExternalIdentityRepository ..> ExternalIdentity
+
+note for UserAccount "identityId is a UUID scalar, not a JPA object association."
+note for TenantMembership "userId is a UUID scalar, not a JPA object association."

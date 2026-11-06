@@ -1,0 +1,54 @@
+name: Auth Service CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "services/auth-service/**"
+      - ".github/workflows/auth-service-ci.yml"
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "services/auth-service/**"
+      - ".github/workflows/auth-service-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    name: Test and build Auth Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 27
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "27"
+          cache: maven
+          cache-dependency-path: services/auth-service/pom.xml
+
+      - name: Verify Maven wrapper
+        run: chmod +x services/auth-service/mvnw
+
+      - name: Compile and run tests
+        run: >
+          ./services/auth-service/mvnw
+          --batch-mode
+          -f services/auth-service/pom.xml
+          verify
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --pull \
+            -t tenantguard/auth-service:ci \
+            services/auth-service
