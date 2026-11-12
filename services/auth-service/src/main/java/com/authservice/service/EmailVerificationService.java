@@ -4,6 +4,7 @@ import com.authservice.domain.EmailAddress;
 import com.authservice.domain.IdentityStatus;
 import com.authservice.persistence.EmailVerificationCode;
 import com.authservice.persistence.EmailVerificationCodeRepository;
+import com.authservice.persistence.EmailVerificationCodeStatus;
 import com.authservice.persistence.UserIdentity;
 import com.authservice.persistence.UserIdentityRepository;
 import org.slf4j.Logger;
@@ -14,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 @Service
@@ -25,14 +27,17 @@ public class EmailVerificationService {
     private final EmailVerificationCodeRepository verificationRepository;
     private final UserIdentityRepository identityRepository;
     private final RegistrationRateLimiter rateLimiter;
+    private final RegistrationEmailLock registrationEmailLock;
 
     public EmailVerificationService(
             EmailVerificationCodeRepository verificationRepository,
             UserIdentityRepository identityRepository,
-            RegistrationRateLimiter rateLimiter) {
+            RegistrationRateLimiter rateLimiter,
+            RegistrationEmailLock registrationEmailLock) {
         this.verificationRepository = verificationRepository;
         this.identityRepository = identityRepository;
         this.rateLimiter = rateLimiter;
+        this.registrationEmailLock = registrationEmailLock;
     }
 
     @Transactional
@@ -45,50 +50,60 @@ public class EmailVerificationService {
             return false;
         }
 
-        UserIdentity identity = identityRepository.findByNormalizedEmailForUpdate(normalizedEmail)
-                .orElse(null);
-        if (identity == null || identity.isVerified()) {
-            log.info("Email verification did not match a pending identity.");
-            return false;
-        }
-
+        registrationEmailLock.acquire(normalizedEmail);
+        Instant now = Instant.now();
         List<EmailVerificationCode> codes = verificationRepository
-                .findAllActiveByIdentityIdForUpdate(identity.getId());
+                .findAllPendingByNormalizedEmailForUpdate(normalizedEmail);
         if (codes.isEmpty()) {
             log.info("Email verification did not match an active challenge.");
             return false;
         }
-
-        Instant now = Instant.now();
         EmailVerificationCode verificationCode = codes.getFirst();
         if (!verificationCode.isUsable(now)) {
-            verificationCode.consume(now);
-            verificationRepository.save(verificationCode);
-            log.info("Email verification challenge was expired or exhausted.");
+            verificationRepository.delete(verificationCode);
+            log.info("Email verification challenge was expired or exhausted and removed.");
             return false;
         }
 
         if (!VerificationCodeHasher.matches(verificationCode.getCodeHash(), code)) {
             verificationCode.recordFailedAttempt(now);
+        if (verificationCode.getStatus() == EmailVerificationCodeStatus.CONSUMED) {
+            verificationRepository.delete(verificationCode);
+        } else {
             verificationRepository.save(verificationCode);
-            log.info("Email verification challenge did not match.");
+        }
+        log.info("Email verification challenge did not match.");
+        return false;
+        }
+
+        UserIdentity identity = identityRepository.findByNormalizedEmailForUpdate(normalizedEmail)
+                .orElseGet(() -> UserIdentity.builder()
+                        .id(UUID.randomUUID())
+                        .email(EmailAddress.of(rawEmail).raw())
+                        .normalizedEmail(normalizedEmail)
+                        .createdAt(now)
+                        .build());
+        if (identity.isVerified()) {
+            verificationRepository.delete(verificationCode);
+            log.info("Email verification challenge was removed for an already verified identity.");
             return false;
         }
 
+        identity.setEmail(EmailAddress.of(rawEmail).raw());
+        identity.setPasswordHash(verificationCode.getTemporaryPasswordHash());
         identity.setStatus(IdentityStatus.VERIFIED);
         identity.setEmailVerifiedAt(now);
-        verificationCode.consume(now);
         identityRepository.save(identity);
-        verificationRepository.save(verificationCode);
-        log.info("Email ownership verified; no tenant membership was activated.");
+        verificationRepository.delete(verificationCode);
+        log.info("Email ownership verified and temporary registration data removed.");
         return true;
     }
 
-    @Scheduled(fixedDelay = 21_600_000)
+    @Scheduled(fixedDelay = 60_000)
     @Transactional
     public void deleteExpiredChallenges() {
-        int deleted = verificationRepository.deleteExpiredOrConsumedBefore(
-                Instant.now().minusSeconds(30L * 24 * 60 * 60));
+        Instant cutoff = Instant.now();
+        int deleted = verificationRepository.deleteExpiredOrConsumedBefore(cutoff);
         if (deleted > 0) {
             log.info("Removed {} expired or consumed verification challenge(s).", deleted);
         }

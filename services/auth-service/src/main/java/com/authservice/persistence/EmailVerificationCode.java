@@ -2,6 +2,8 @@ package com.authservice.persistence;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
@@ -38,6 +40,9 @@ public class EmailVerificationCode {
     @Column(name = "code_hash", nullable = false, unique = true, length = 64, updatable = false)
     private String codeHash;
 
+    @Column(name = "temporary_password_hash", nullable = false, length = 100)
+    private String temporaryPasswordHash;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -47,6 +52,11 @@ public class EmailVerificationCode {
     @Column(name = "failed_attempts", nullable = false)
     @Builder.Default
     private int failedAttempts = 0;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 16)
+    @Builder.Default
+    private EmailVerificationCodeStatus status = EmailVerificationCodeStatus.PENDING;
 
     @Column(name = "consumed_at")
     private Instant consumedAt;
@@ -59,20 +69,24 @@ public class EmailVerificationCode {
         if (createdAt == null) {
             createdAt = Instant.now();
         }
+        if (status == null) {
+            status = EmailVerificationCodeStatus.PENDING;
+        }
     }
 
     public boolean isUsable(Instant now) {
-        return consumedAt == null && now.isBefore(expiresAt) && failedAttempts < MAX_FAILED_ATTEMPTS;
+        return status == EmailVerificationCodeStatus.PENDING
+                && consumedAt == null
+                && now.isBefore(expiresAt)
+                && failedAttempts < MAX_FAILED_ATTEMPTS;
     }
 
     public void recordFailedAttempt(Instant now) {
         failedAttempts++;
         if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+            status = EmailVerificationCodeStatus.CONSUMED;
             consumedAt = now;
         }
     }
 
-    public void consume(Instant now) {
-        consumedAt = now;
-    }
 }

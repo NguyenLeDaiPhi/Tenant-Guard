@@ -81,7 +81,7 @@ public class UserAccount {
         if (id == null) {
             id = UUID.randomUUID();
         }
-        Instant now = Instant.now();
+        Instant now = Instant.now();    
         if (createdAt == null) {
             createdAt = now;
         }

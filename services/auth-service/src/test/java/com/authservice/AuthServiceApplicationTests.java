@@ -5,11 +5,15 @@ import com.authservice.domain.AuthenticatedIdentity;
 import com.authservice.domain.IdentityStatus;
 import com.authservice.domain.MembershipStatus;
 import com.authservice.domain.UserRole;
+import com.authservice.persistence.EmailVerificationCode;
+import com.authservice.persistence.EmailVerificationCodeRepository;
 import com.authservice.persistence.TenantMembershipRepository;
 import com.authservice.persistence.UserAccount;
 import com.authservice.persistence.UserAccountRepository;
+import com.authservice.persistence.UserIdentity;
 import com.authservice.persistence.UserIdentityRepository;
 import com.authservice.service.AccessTokenService;
+import com.authservice.service.EmailVerificationService;
 import com.authservice.service.VerificationEmailSender;
 import com.authservice.service.VerificationCodeHasher;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +33,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.UUID;
 
@@ -97,6 +102,12 @@ class AuthServiceApplicationTests {
         private UserIdentityRepository userIdentityRepository;
 
         @Autowired
+        private EmailVerificationCodeRepository verificationCodeRepository;
+
+        @Autowired
+        private EmailVerificationService emailVerificationService;
+
+        @Autowired
         private JdbcTemplate jdbcTemplate;
 
         @Autowired
@@ -121,10 +132,12 @@ class AuthServiceApplicationTests {
 
                 assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(
                                 TENANT_ID, "unknown@example.com")).isEmpty();
-                assertThat(userIdentityRepository.findByNormalizedEmail("unknown@example.com"))
-                                .get()
-                                .extracting(identity -> identity.getStatus())
-                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
+                assertThat(userIdentityRepository.findByNormalizedEmail("unknown@example.com")).isEmpty();
+                assertThat(jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM public.email_verification_codes WHERE normalized_email = ? AND status = 'PENDING'",
+                                Integer.class,
+                                "unknown@example.com"))
+                                .isEqualTo(1);
                 verify(emailSender).sendVerificationCode(
                                 org.mockito.ArgumentMatchers.eq("unknown@example.com"),
                                 org.mockito.ArgumentMatchers.any());
@@ -149,11 +162,14 @@ class AuthServiceApplicationTests {
                                 .content(body))
                                 .andExpect(status().isAccepted());
 
-                var pendingIdentity = userIdentityRepository.findByNormalizedEmail(email)
-                                .orElseThrow();
-                assertThat(pendingIdentity.getStatus()).isEqualTo(IdentityStatus.PENDING_EMAIL);
-                assertThat(passwordEncoder.matches("SecurePassword123!", pendingIdentity.getPasswordHash())).isTrue();
+                assertThat(userIdentityRepository.findByNormalizedEmail(email)).isEmpty();
+                String temporaryPasswordHash = jdbcTemplate.queryForObject(
+                                "SELECT temporary_password_hash FROM public.email_verification_codes WHERE normalized_email = ? AND status = 'PENDING'",
+                                String.class,
+                                email);
+                assertThat(passwordEncoder.matches("SecurePassword123!", temporaryPasswordHash)).isTrue();
                 assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
+                assertThat(userAccountRepository.findAllByNormalizedEmail(email)).isEmpty();
                 assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_MANAGER, MembershipStatus.PENDING))
                                 .isEqualTo(1);
                 mockMvc.perform(post("/api/auth/login")
@@ -170,6 +186,7 @@ class AuthServiceApplicationTests {
                                 email);
                 assertThat(storedCodeHash).isEqualTo(VerificationCodeHasher.hash(code));
                 assertThat(storedCodeHash).isNotEqualTo(code);
+                assertThat(temporaryPasswordHash).isNotEqualTo("SecurePassword123!");
 
                 mockMvc.perform(post("/api/auth/verify-email")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -178,6 +195,15 @@ class AuthServiceApplicationTests {
 
                 assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
                                 .isEqualTo(IdentityStatus.VERIFIED);
+                assertThat(passwordEncoder.matches(
+                                "SecurePassword123!",
+                                userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getPasswordHash()))
+                                .isTrue();
+                assertThat(jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM public.email_verification_codes WHERE normalized_email = ?",
+                                Integer.class,
+                                email))
+                                .isZero();
                 assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_MANAGER, MembershipStatus.PENDING))
                                 .isEqualTo(1);
                 assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
@@ -224,8 +250,7 @@ class AuthServiceApplicationTests {
                 ArgumentCaptor<String> codes = ArgumentCaptor.forClass(String.class);
                 verify(emailSender, org.mockito.Mockito.times(2))
                                 .sendVerificationCode(org.mockito.ArgumentMatchers.eq(email), codes.capture());
-                assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
-                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
+                assertThat(userIdentityRepository.findByNormalizedEmail(email)).isEmpty();
 
                 mockMvc.perform(post("/api/auth/verify-email")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -298,10 +323,69 @@ class AuthServiceApplicationTests {
                                 .andExpect(status().isBadRequest());
 
                 assertThat(userAccountRepository.findByTenantIdAndNormalizedEmail(TENANT_ID, email)).isEmpty();
-                assertThat(userIdentityRepository.findByNormalizedEmail(email).orElseThrow().getStatus())
-                                .isEqualTo(IdentityStatus.PENDING_EMAIL);
+                assertThat(userIdentityRepository.findByNormalizedEmail(email)).isEmpty();
                 assertThat(countMembership(TENANT_ID, email, UserRole.ORDER_VIEWER, MembershipStatus.PENDING))
                                 .isEqualTo(1);
+        }
+
+        @Test
+        void expiredChallengeCleanupDoesNotDeleteVerifiedIdentityCredentials() {
+                String email = uniqueEmail();
+                String passwordHash = passwordEncoder.encode("SecurePassword123!");
+                Instant now = Instant.now();
+                UserIdentity identity = userIdentityRepository.saveAndFlush(UserIdentity.builder()
+                                .id(UUID.randomUUID())
+                                .email(email)
+                                .normalizedEmail(email)
+                                .passwordHash(passwordHash)
+                                .status(IdentityStatus.VERIFIED)
+                                .createdAt(now.minusSeconds(3600))
+                                .updatedAt(now.minusSeconds(3600))
+                                .emailVerifiedAt(now.minusSeconds(1800))
+                                .build());
+                EmailVerificationCode expiredChallenge = verificationCodeRepository.saveAndFlush(
+                                EmailVerificationCode.builder()
+                                                .id(UUID.randomUUID())
+                                                .normalizedEmail(email)
+                                                .identityId(identity.getId())
+                                                .codeHash(VerificationCodeHasher.hash("a".repeat(64)))
+                                                .temporaryPasswordHash(passwordEncoder.encode(
+                                                                "AnotherPassword123!"))
+                                                .createdAt(now.minusSeconds(1200))
+                                                .expiresAt(now.minusSeconds(300))
+                                                .build());
+
+                emailVerificationService.deleteExpiredChallenges();
+
+                assertThat(verificationCodeRepository.findById(expiredChallenge.getId())).isEmpty();
+                UserIdentity retainedIdentity = userIdentityRepository.findByNormalizedEmail(email).orElseThrow();
+                assertThat(retainedIdentity.isVerified()).isTrue();
+                assertThat(retainedIdentity.getPasswordHash()).isEqualTo(passwordHash);
+        }
+
+        @Test
+        void expiredChallengeIsRejectedAndRemovedWithoutCreatingIdentity() throws Exception {
+                String email = uniqueEmail();
+                String code = "b".repeat(64);
+                Instant now = Instant.now();
+                EmailVerificationCode expiredChallenge = verificationCodeRepository.saveAndFlush(
+                                EmailVerificationCode.builder()
+                                                .id(UUID.randomUUID())
+                                                .normalizedEmail(email)
+                                                .codeHash(VerificationCodeHasher.hash(code))
+                                                .temporaryPasswordHash(passwordEncoder.encode(
+                                                                "SecurePassword123!"))
+                                                .createdAt(now.minusSeconds(1200))
+                                                .expiresAt(now.minusSeconds(300))
+                                                .build());
+
+                mockMvc.perform(post("/api/auth/verify-email")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(verifyBody(email, code, "SecurePassword123!")))
+                                .andExpect(status().isBadRequest());
+
+                assertThat(verificationCodeRepository.findById(expiredChallenge.getId())).isEmpty();
+                assertThat(userIdentityRepository.findByNormalizedEmail(email)).isEmpty();
         }
 
         private int countMembership(UUID tenantId, String email, UserRole role, MembershipStatus status) {

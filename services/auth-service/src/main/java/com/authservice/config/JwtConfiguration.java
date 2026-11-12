@@ -24,14 +24,11 @@ import java.util.Base64;
 @EnableConfigurationProperties(JwtProperties.class)
 public class JwtConfiguration {
 
-    private final JwtProperties properties;
     private final RSAPrivateKey privateKey;
     private final RSAPublicKey publicKey;
     private final RSAKey rsaKey;
 
     public JwtConfiguration(JwtProperties properties) {
-        this.properties = properties;
-
         String privBase64 = properties.privateKeyBase64();
         String pubBase64 = properties.publicKeyBase64();
 

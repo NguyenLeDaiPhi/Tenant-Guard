@@ -31,6 +31,7 @@ class EmailVerificationServiceTests {
     private EmailVerificationCodeRepository verificationRepository;
     private UserIdentityRepository identityRepository;
     private RegistrationRateLimiter rateLimiter;
+    private RegistrationEmailLock registrationEmailLock;
     private EmailVerificationService verificationService;
 
     @BeforeEach
@@ -38,86 +39,79 @@ class EmailVerificationServiceTests {
         verificationRepository = mock(EmailVerificationCodeRepository.class);
         identityRepository = mock(UserIdentityRepository.class);
         rateLimiter = mock(RegistrationRateLimiter.class);
+        registrationEmailLock = mock(RegistrationEmailLock.class);
         verificationService = new EmailVerificationService(
                 verificationRepository,
                 identityRepository,
-                rateLimiter
+                rateLimiter,
+                registrationEmailLock
         );
     }
 
     @Test
-    void verifiesIdentityEmailWithoutActivatingTenantMemberships() {
-        UserIdentity identity = pendingIdentity();
-        EmailVerificationCode challenge = verificationCode(identity.getId(), Instant.now().plusSeconds(300));
-        when(identityRepository.findByNormalizedEmailForUpdate(EMAIL)).thenReturn(Optional.of(identity));
-        when(verificationRepository.findAllActiveByIdentityIdForUpdate(identity.getId()))
+    void createsVerifiedIdentityAndDeletesTemporaryChallenge() {
+        EmailVerificationCode challenge = verificationCode(Instant.now().plusSeconds(300));
+        when(verificationRepository.findAllPendingByNormalizedEmailForUpdate(EMAIL))
                 .thenReturn(List.of(challenge));
 
         assertThat(verificationService.verify(EMAIL, CODE, CLIENT_IP)).isTrue();
 
+        var identityCaptor = org.mockito.ArgumentCaptor.forClass(UserIdentity.class);
+        verify(identityRepository).save(identityCaptor.capture());
+        UserIdentity identity = identityCaptor.getValue();
         assertThat(identity.getStatus()).isEqualTo(IdentityStatus.VERIFIED);
         assertThat(identity.getEmailVerifiedAt()).isNotNull();
-        assertThat(challenge.getConsumedAt()).isNotNull();
-        verify(identityRepository).save(identity);
-        verify(verificationRepository).save(challenge);
+        assertThat(identity.getPasswordHash()).isEqualTo("temporary-password-hash");
+        verify(verificationRepository).delete(challenge);
+        verify(verificationRepository, never()).save(challenge);
     }
 
     @Test
-    void incorrectCodeIncrementsAttemptsAndLeavesIdentityPending() {
-        UserIdentity identity = pendingIdentity();
-        EmailVerificationCode challenge = verificationCode(identity.getId(), Instant.now().plusSeconds(300));
-        when(identityRepository.findByNormalizedEmailForUpdate(EMAIL)).thenReturn(Optional.of(identity));
-        when(verificationRepository.findAllActiveByIdentityIdForUpdate(identity.getId()))
+    void incorrectCodeIncrementsAttemptsWithoutCreatingIdentity() {
+        EmailVerificationCode challenge = verificationCode(Instant.now().plusSeconds(300));
+        when(verificationRepository.findAllPendingByNormalizedEmailForUpdate(EMAIL))
                 .thenReturn(List.of(challenge));
 
         assertThat(verificationService.verify(EMAIL, "b".repeat(64), CLIENT_IP)).isFalse();
 
         assertThat(challenge.getFailedAttempts()).isEqualTo(1);
-        assertThat(identity.getStatus()).isEqualTo(IdentityStatus.PENDING_EMAIL);
-        assertThat(identity.getEmailVerifiedAt()).isNull();
         verify(verificationRepository).save(challenge);
         verify(identityRepository, never()).save(any(UserIdentity.class));
     }
 
     @Test
-    void maxFailedAttemptsConsumesChallengeAndRejectsAttempt() {
-        UserIdentity identity = pendingIdentity();
-        EmailVerificationCode challenge = verificationCode(identity.getId(), Instant.now().plusSeconds(300));
+    void maxFailedAttemptsDeleteChallengeAndRejectAttempt() {
+        EmailVerificationCode challenge = verificationCode(Instant.now().plusSeconds(300));
         challenge.setFailedAttempts(4);
-        when(identityRepository.findByNormalizedEmailForUpdate(EMAIL)).thenReturn(Optional.of(identity));
-        when(verificationRepository.findAllActiveByIdentityIdForUpdate(identity.getId()))
+        when(verificationRepository.findAllPendingByNormalizedEmailForUpdate(EMAIL))
                 .thenReturn(List.of(challenge));
 
         assertThat(verificationService.verify(EMAIL, "c".repeat(64), CLIENT_IP)).isFalse();
 
         assertThat(challenge.getFailedAttempts()).isEqualTo(5);
-        assertThat(challenge.getConsumedAt()).isNotNull();
-        verify(verificationRepository).save(challenge);
+        verify(verificationRepository).delete(challenge);
         verify(identityRepository, never()).save(any(UserIdentity.class));
     }
 
     @Test
-    void expiredChallengeIsRejectedAndConsumed() {
-        UserIdentity identity = pendingIdentity();
-        EmailVerificationCode challenge = verificationCode(identity.getId(), Instant.now().minusSeconds(1));
-        when(identityRepository.findByNormalizedEmailForUpdate(EMAIL)).thenReturn(Optional.of(identity));
-        when(verificationRepository.findAllActiveByIdentityIdForUpdate(identity.getId()))
+    void expiredChallengeIsRejectedAndDeleted() {
+        EmailVerificationCode challenge = verificationCode(Instant.now().minusSeconds(1));
+        when(verificationRepository.findAllPendingByNormalizedEmailForUpdate(EMAIL))
                 .thenReturn(List.of(challenge));
 
         assertThat(verificationService.verify(EMAIL, CODE, CLIENT_IP)).isFalse();
 
-        assertThat(challenge.getConsumedAt()).isNotNull();
-        verify(verificationRepository).save(challenge);
+        verify(verificationRepository).delete(challenge);
         verify(identityRepository, never()).save(any(UserIdentity.class));
     }
 
     @Test
-    void missingIdentityDoesNotLookUpVerificationChallenges() {
-        when(identityRepository.findByNormalizedEmailForUpdate(EMAIL)).thenReturn(Optional.empty());
-
+    void missingChallengeDoesNotCreateIdentity() {
+        when(verificationRepository.findAllPendingByNormalizedEmailForUpdate(EMAIL))
+                .thenReturn(List.of());
         assertThat(verificationService.verify(EMAIL, CODE, CLIENT_IP)).isFalse();
 
-        verify(verificationRepository, never()).findAllActiveByIdentityIdForUpdate(any());
+        verify(identityRepository, never()).findByNormalizedEmailForUpdate(any());
     }
 
     @Test
@@ -136,27 +130,15 @@ class EmailVerificationServiceTests {
                 .isInstanceOf(RateLimitExceededException.class);
 
         verify(identityRepository, never()).findByNormalizedEmailForUpdate(any());
-        verify(verificationRepository, never()).findAllActiveByIdentityIdForUpdate(any());
+        verify(verificationRepository, never()).findAllPendingByNormalizedEmailForUpdate(any());
     }
 
-    private static UserIdentity pendingIdentity() {
-        return UserIdentity.builder()
-                .id(UUID.randomUUID())
-                .email(EMAIL)
-                .normalizedEmail(EMAIL)
-                .passwordHash("encoded-password")
-                .status(IdentityStatus.PENDING_EMAIL)
-                .createdAt(Instant.now())
-                .updatedAt(Instant.now())
-                .build();
-    }
-
-    private static EmailVerificationCode verificationCode(UUID identityId, Instant expiresAt) {
+    private static EmailVerificationCode verificationCode(Instant expiresAt) {
         return EmailVerificationCode.builder()
                 .id(UUID.randomUUID())
                 .normalizedEmail(EMAIL)
-                .identityId(identityId)
                 .codeHash(VerificationCodeHasher.hash(CODE))
+                .temporaryPasswordHash("temporary-password-hash")
                 .createdAt(Instant.now().minusSeconds(10))
                 .expiresAt(expiresAt)
                 .build();
