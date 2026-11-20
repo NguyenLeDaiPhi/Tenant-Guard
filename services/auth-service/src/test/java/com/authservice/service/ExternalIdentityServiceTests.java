@@ -1,15 +1,14 @@
 package com.authservice.service;
 
-import com.authservice.domain.AccountStatus;
-import com.authservice.domain.AuthenticatedIdentity;
-import com.authservice.domain.UserRole;
+import com.authservice.domain.IdentityStatus;
 import com.authservice.persistence.ExternalIdentity;
 import com.authservice.persistence.ExternalIdentityRepository;
-import com.authservice.persistence.UserAccount;
-import com.authservice.persistence.UserAccountRepository;
+import com.authservice.persistence.UserIdentity;
+import com.authservice.persistence.UserIdentityRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -23,140 +22,192 @@ import static org.mockito.Mockito.when;
 
 class ExternalIdentityServiceTests {
 
-    private static final UUID TENANT_ID = UUID.fromString("11111111-1111-4111-8111-111111111111");
     private ExternalIdentityRepository externalIdentityRepository;
-    private UserAccountRepository userAccountRepository;
-    private TenantStatusService tenantStatusService;
+    private UserIdentityRepository userIdentityRepository;
     private ExternalIdentityService externalIdentityService;
 
     @BeforeEach
     void setUp() {
         externalIdentityRepository = mock(ExternalIdentityRepository.class);
-        userAccountRepository = mock(UserAccountRepository.class);
-        tenantStatusService = mock(TenantStatusService.class);
+        userIdentityRepository = mock(UserIdentityRepository.class);
         externalIdentityService = new ExternalIdentityService(
                 externalIdentityRepository,
-                userAccountRepository,
-                tenantStatusService
-        );
+                userIdentityRepository);
     }
 
     @Test
-    void refusesToLinkIdentityAlreadyOwnedByDifferentAccount() {
-        UUID existingUserId = UUID.randomUUID();
-        UUID newUserId = UUID.randomUUID();
-        String subject = "google-subject-12345";
-
-        UserAccount newUser = UserAccount.builder()
-                .id(newUserId)
-                .tenantId(TENANT_ID)
-                .email("user2@example.com")
-                .normalizedEmail("user2@example.com")
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .build();
-
-        ExternalIdentity existingIdentity = ExternalIdentity.builder()
+    void authenticatesFromProviderSubjectAndGlobalIdentityOnly() {
+        UUID globalUserId = UUID.randomUUID();
+        String subject = "google-subject-global";
+        ExternalIdentity externalIdentity = ExternalIdentity.builder()
                 .id(UUID.randomUUID())
-                .userId(existingUserId)
+                .globalUserId(globalUserId)
                 .provider(ExternalIdentityService.PROVIDER_GOOGLE)
                 .providerSubject(subject)
-                .emailVerified(true)
                 .build();
+        UserIdentity globalIdentity = verifiedIdentity(globalUserId);
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, subject))
+                .thenReturn(Optional.of(externalIdentity));
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.of(globalIdentity));
 
-        when(userAccountRepository.findById(newUserId)).thenReturn(Optional.of(newUser));
-        when(externalIdentityRepository.findByProviderAndProviderSubject(ExternalIdentityService.PROVIDER_GOOGLE, subject))
-                .thenReturn(Optional.of(existingIdentity));
+        var authenticated = externalIdentityService.authenticateGoogleIdentity(subject);
 
-        assertThatThrownBy(() -> externalIdentityService.linkIdentity(
-                newUserId, ExternalIdentityService.PROVIDER_GOOGLE, subject, true))
-                .isInstanceOf(ExternalIdentityConflictException.class)
-                .hasMessageContaining("already linked to a different account");
-
-        verify(externalIdentityRepository, never()).save(any());
-    }
-
-    @Test
-    void linkingSameSubjectToSameAccountIsIdempotent() {
-        UUID userId = UUID.randomUUID();
-        String subject = "google-subject-12345";
-
-        UserAccount user = UserAccount.builder()
-                .id(userId)
-                .tenantId(TENANT_ID)
-                .email("user@example.com")
-                .normalizedEmail("user@example.com")
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .build();
-
-        ExternalIdentity existingIdentity = ExternalIdentity.builder()
-                .id(UUID.randomUUID())
-                .userId(userId)
-                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
-                .providerSubject(subject)
-                .emailVerified(true)
-                .build();
-
-        when(userAccountRepository.findById(userId)).thenReturn(Optional.of(user));
-        when(externalIdentityRepository.findByProviderAndProviderSubject(ExternalIdentityService.PROVIDER_GOOGLE, subject))
-                .thenReturn(Optional.of(existingIdentity));
-
-        ExternalIdentity result = externalIdentityService.linkIdentity(
-                userId, ExternalIdentityService.PROVIDER_GOOGLE, subject, true);
-
-        assertThat(result).isSameAs(existingIdentity);
-        verify(externalIdentityRepository, never()).save(any());
-    }
-
-    @Test
-    void authenticatesOnlyFromProviderSubjectMapping() {
-        UUID userId = UUID.randomUUID();
-        String subject = "google-subject-12345";
-
-        ExternalIdentity identity = ExternalIdentity.builder()
-                .id(UUID.randomUUID())
-                .userId(userId)
-                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
-                .providerSubject(subject)
-                .emailVerified(true)
-                .build();
-
-        UserAccount user = UserAccount.builder()
-                .id(userId)
-                .tenantId(TENANT_ID)
-                .email("user@example.com")
-                .normalizedEmail("user@example.com")
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .build();
-
-        when(externalIdentityRepository.findByProviderAndProviderSubject(ExternalIdentityService.PROVIDER_GOOGLE, subject))
-                .thenReturn(Optional.of(identity));
-        when(userAccountRepository.findById(userId)).thenReturn(Optional.of(user));
-
-        AuthenticatedIdentity authenticated = externalIdentityService.authenticateGoogleIdentity(subject);
-
-        assertThat(authenticated.userId()).isEqualTo(userId);
-        assertThat(authenticated.tenantId()).isEqualTo(TENANT_ID);
-        assertThat(authenticated.role()).isEqualTo(UserRole.ORDER_VIEWER);
+        assertThat(authenticated.globalUserId()).isEqualTo(globalUserId);
         assertThat(authenticated.email()).isEqualTo("user@example.com");
+        verify(userIdentityRepository).findById(globalUserId);
     }
 
     @Test
-    void matchingEmailDoesNotLinkAnUnmappedGoogleSubject() {
-        String unmappedSubject = "unmapped-google-sub-999";
-
-        when(externalIdentityRepository.findByProviderAndProviderSubject(ExternalIdentityService.PROVIDER_GOOGLE, unmappedSubject))
+    void rejectsUnmappedProviderSubjectWithoutEmailBasedLinking() {
+        String subject = "unmapped-google-subject";
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, subject))
                 .thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> externalIdentityService.authenticateGoogleIdentity(unmappedSubject))
+        assertThatThrownBy(() -> externalIdentityService.authenticateGoogleIdentity(subject))
                 .isInstanceOf(ExternalIdentityNotLinkedException.class)
-                .hasMessageContaining("Google identity is not linked");
+                .hasMessageContaining("not linked");
 
-        // Asserts that no account lookup or automatic linking occurs solely by email
-        verify(userAccountRepository, never()).findByNormalizedEmailAndTenantIdIsNull(any());
-        verify(userAccountRepository, never()).findByTenantIdAndNormalizedEmail(any(), any());
+        verify(userIdentityRepository, never()).findByNormalizedEmail(any());
         verify(externalIdentityRepository, never()).save(any());
+    }
+
+    @Test
+    void rejectsLegacyProviderMappingWithoutGlobalIdentity() {
+        ExternalIdentity legacyIdentity = ExternalIdentity.builder()
+                .id(UUID.randomUUID())
+                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
+                .providerSubject("legacy-google-subject")
+                .build();
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, "legacy-google-subject"))
+                .thenReturn(Optional.of(legacyIdentity));
+
+        assertThatThrownBy(() -> externalIdentityService.authenticateGoogleIdentity("legacy-google-subject"))
+                .isInstanceOf(ExternalIdentityNotLinkedException.class)
+                .hasMessageContaining("relinking");
+
+        verify(userIdentityRepository, never()).findById(any());
+    }
+
+    @Test
+    void refusesToAuthenticateUnavailableGlobalIdentity() {
+        UUID globalUserId = UUID.randomUUID();
+        ExternalIdentity externalIdentity = ExternalIdentity.builder()
+                .id(UUID.randomUUID())
+                .globalUserId(globalUserId)
+                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
+                .providerSubject("disabled-google-subject")
+                .build();
+        UserIdentity disabledIdentity = verifiedIdentity(globalUserId);
+        disabledIdentity.setStatus(IdentityStatus.DISABLED);
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, externalIdentity.getProviderSubject()))
+                .thenReturn(Optional.of(externalIdentity));
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.of(disabledIdentity));
+
+        assertThatThrownBy(() -> externalIdentityService.authenticateGoogleIdentity(
+                externalIdentity.getProviderSubject()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("unavailable");
+    }
+
+    @Test
+    void linksOnlyVerifiedGlobalIdentities() {
+        UUID globalUserId = UUID.randomUUID();
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> externalIdentityService.linkIdentity(
+                globalUserId,
+                ExternalIdentityService.PROVIDER_GOOGLE,
+                "new-google-subject",
+                true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not exist");
+
+        verify(externalIdentityRepository, never()).save(any());
+    }
+
+    @Test
+    void refusesToLinkProviderSubjectAlreadyOwnedByAnotherGlobalIdentity() {
+        UUID globalUserId = UUID.randomUUID();
+        UUID existingUserId = UUID.randomUUID();
+        UserIdentity identity = verifiedIdentity(globalUserId);
+        ExternalIdentity existing = ExternalIdentity.builder()
+                .id(UUID.randomUUID())
+                .globalUserId(existingUserId)
+                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
+                .providerSubject("already-linked")
+                .build();
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.of(identity));
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, "already-linked"))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> externalIdentityService.linkIdentity(
+                globalUserId, ExternalIdentityService.PROVIDER_GOOGLE, "already-linked", true))
+                .isInstanceOf(ExternalIdentityConflictException.class)
+                .hasMessageContaining("different global identity");
+
+        verify(externalIdentityRepository, never()).save(any());
+    }
+
+    @Test
+    void linkingSameProviderSubjectToSameGlobalIdentityIsIdempotent() {
+        UUID globalUserId = UUID.randomUUID();
+        UserIdentity identity = verifiedIdentity(globalUserId);
+        ExternalIdentity existing = ExternalIdentity.builder()
+                .id(UUID.randomUUID())
+                .globalUserId(globalUserId)
+                .provider(ExternalIdentityService.PROVIDER_GOOGLE)
+                .providerSubject("existing-link")
+                .build();
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.of(identity));
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, "existing-link"))
+                .thenReturn(Optional.of(existing));
+
+        ExternalIdentity result = externalIdentityService.linkIdentity(
+                globalUserId, ExternalIdentityService.PROVIDER_GOOGLE, "existing-link", true);
+
+        assertThat(result).isSameAs(existing);
+        verify(externalIdentityRepository, never()).save(any());
+    }
+
+    @Test
+    void linksNewGoogleSubjectToVerifiedGlobalIdentity() {
+        UUID globalUserId = UUID.randomUUID();
+        UserIdentity identity = verifiedIdentity(globalUserId);
+        when(userIdentityRepository.findById(globalUserId)).thenReturn(Optional.of(identity));
+        when(externalIdentityRepository.findByProviderAndProviderSubject(
+                ExternalIdentityService.PROVIDER_GOOGLE, "new-google-subject"))
+                .thenReturn(Optional.empty());
+        when(externalIdentityRepository.save(any(ExternalIdentity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ExternalIdentity linked = externalIdentityService.linkIdentity(
+                globalUserId,
+                ExternalIdentityService.PROVIDER_GOOGLE,
+                "new-google-subject",
+                true);
+
+        assertThat(linked.getGlobalUserId()).isEqualTo(globalUserId);
+        assertThat(linked.getProviderSubject()).isEqualTo("new-google-subject");
+        verify(externalIdentityRepository).save(any(ExternalIdentity.class));
+    }
+
+    private static UserIdentity verifiedIdentity(UUID id) {
+        Instant now = Instant.now();
+        return UserIdentity.builder()
+                .id(id)
+                .email("user@example.com")
+                .normalizedEmail("user@example.com")
+                .passwordHash("unused")
+                .status(IdentityStatus.VERIFIED)
+                .createdAt(now)
+                .updatedAt(now)
+                .emailVerifiedAt(now)
+                .build();
     }
 }

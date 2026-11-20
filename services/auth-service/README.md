@@ -1,6 +1,6 @@
 # Auth Service
 
-The Authentication Service (`auth-service`) manages tenant-scoped user accounts, administrator-provisioned memberships, email-verified public registration, credential verification, external identity mapping (Google OIDC), and short-lived RS256 JWT access token issuance for the TenantGuard OMS platform.
+The Authentication Service (`auth-service`) manages global identities, email-verified registration, credential verification, external identity mapping (Google OIDC), and short-lived RS256 JWT issuance. Login is independent of tenant creation and membership; Tenant Service owns tenant onboarding and membership authorization.
 
 It is implemented with **Spring Boot 4 / Spring Security 7 on Java 27**, aligning with the documented microservice boundaries and least-privilege PostgreSQL database isolation.
 
@@ -9,18 +9,17 @@ It is implemented with **Spring Boot 4 / Spring Security 7 on Java 27**, alignin
 ## 1. Architectural Role and Service Boundaries
 
 - **Database Ownership**:
-  - `auth-service` owns `public.users`, `public.tenant_memberships`, `public.email_verification_codes`, `public.auth_rate_limits`, and `public.external_identities`.
-  - `tenant-service` owns `public.tenants` and provisions tenant schemas (`tenant_{id}`).
-  - `auth-service` has **read-only** visibility into `public.tenants.status` via a JDBC repository. It does not map `public.tenants` as a Hibernate entity, so Hibernate schema validation does not require the other service's table to be present during Auth Service startup.
+  - `auth-service` owns global `public.user_identities`, verification challenges, rate-limit buckets, and external identity mappings.
+  - `tenant-service` owns tenants, memberships, invitations, and subscriptions in the `tenant_service` schema. Auth does not read or write tenant tables.
+  - Legacy account, membership, invitation, and tenant-registry records are retained or archived by forward-only migrations; they are not runtime compatibility dependencies.
 - **Zero Lateral Coupling & Stateless Verification**:
-  - Downstream services (`order-service`, `tenant-service`) do not call `auth-service` synchronously at request time.
+  - Downstream services validate tokens with Auth's published public JWK set and do not query Auth's database.
   - Access tokens are signed using **RS256** with an RSA 2048-bit private key.
   - Public keys are published in RFC 7517 format at `/.well-known/jwks.json`.
-  - Downstream services validate tokens statelessly and extract `sub` (user UUID), `role`, and `tid` (tenant ID).
+  - Login JWTs set `sub` to the verified global `user_identities.id`. The compatibility `global_user_id` claim contains the same UUID. Global login tokens do not contain tenant IDs or tenant roles; Tenant Service derives membership and permissions from its own records.
 - **Multi-Tenant Identity Scoping**:
-  - `public.user_identities` stores globally unique email identities and verification state. It does not create an authenticated principal or tenant access.
-  - `PLATFORM_ADMIN`: Global operator; `tenant_id` is `null`; barred from tenant order data.
-  - Tenant Roles (`TENANT_ADMIN`, `ORDER_MANAGER`, `ORDER_VIEWER`): Strictly bound to a non-null `tenant_id`.
+  - `public.user_identities` stores globally unique email identities, verification state, and global login lockout state. A verified identity can authenticate without a tenant membership.
+  - Tenant roles and membership status are stored and enforced only by Tenant Service; Auth JWTs do not contain tenant roles or tenant IDs.
 
 ---
 
@@ -38,9 +37,9 @@ Google OAuth2 / OpenID Connect is an asynchronous, browser-redirect authorizatio
 
 ### Strict External Identity Rules
 - Accounts are **never** automatically linked to Google identities solely by matching email addresses.
-- External identities are mapped by immutable `(provider, provider_subject)` in `public.external_identities`.
+- External identities are mapped by immutable `(provider, provider_subject)` to a global identity in `public.external_identities`.
 - Users must explicitly link their external identity to their authenticated account.
-- Linking is idempotent: re-linking the same provider subject to the same user account succeeds cleanly. Attempting to link a subject already claimed by another account returns `409 Conflict`.
+- Linking is idempotent: re-linking the same provider subject to the same global identity succeeds cleanly. Attempting to link a subject already claimed by another identity returns `409 Conflict`.
 
 ---
 
@@ -51,25 +50,18 @@ Google OAuth2 / OpenID Connect is an asynchronous, browser-redirect authorizatio
   - BCrypt hashing with salt. Plaintext passwords are never persisted or logged.
   - Password length: minimum 12 characters, maximum 72 bytes (BCrypt truncation threshold).
 - **Account Lockout**:
-  - Ten consecutive failed login attempts trigger an automatic 15-minute lockout (`locked_until`).
+  - Ten consecutive failed login attempts against a global identity trigger an automatic 15-minute lockout (`user_identities.locked_until`).
   - Lockout state is cleared automatically upon expiration or on successful login.
-- **Tenant Status Guard**: Authentication requires the tenant status in `public.tenants` to be `ACTIVE`. Inactive or suspended tenants are rejected.
 - **Anti-Enumeration Responses**:
-  - Invalid credentials, locked accounts, disabled accounts, and inactive tenants return a uniform `401 Unauthorized` with the generic message `"Invalid credentials or account unavailable"`.
+  - Invalid credentials, locked identities, and disabled identities return a uniform `401 Unauthorized` with a generic message.
 
-## 4. Local PostgreSQL tenant registry bootstrap
+## 4. PostgreSQL schema ownership
 
-The Auth Service Flyway migrations intentionally do not create `public.tenants`: tenant metadata belongs to Tenant Service, and no Tenant Service implementation or migration exists in this repository yet. The container logs showed the actual startup defect: Hibernate tried to validate `public.tenants` because `TenantStatus` was annotated as a JPA entity, while the Auth Service migrations created only auth-owned tables.
+Auth and Tenant Service use separate PostgreSQL schemas and logins. Tenant Service migrations use the dedicated `tenant_service_migrator` role; the application runs as the restricted `tenant_service` role. The migrator receives temporary access to selected legacy Auth tables for the forward-only data transfer. Tenant V2 archives the old `public.tenants` registry and membership/invitation rows; Tenant V3 verifies and removes the transferred membership/invitation source rows. Auth V10 then removes the obsolete Auth-owned tables.
 
-The fix separates the concerns:
+Auth Service Flyway history remains in the dedicated `auth_service` schema. The Compose bootstrap is idempotent and preserves existing PostgreSQL volumes. Before cleaning up any archived or unresolved data, review `auth_service.legacy_identity_migration_issues`, `auth_service.legacy_identity_migration_accounts`, `auth_service.legacy_external_identity_mappings`, `auth_service.tenant_data_transfer_status`, `tenant_service.legacy_auth_memberships`, and `tenant_service.legacy_auth_invitations`.
 
-- `TenantStatus` is now a plain read model, and `TenantStatusRepository` uses JDBC to read `public.tenants`; Hibernate no longer validates another service's table.
-- `tenant-schema-bootstrap` in the local Compose stack idempotently creates the UUID-based tenant registry before Auth Service starts. The table is owned by a non-login `tenant_service` database role; the separate, non-superuser Auth Service login receives `SELECT` access. This is a local-development stand-in for the missing Tenant Service migration, not an Auth Service migration.
-- Auth Service Flyway history is stored in the dedicated `auth_service` schema, separately from Tenant Service's `public.tenants` table. The bootstrap creates that schema and, for an existing local database, moves the existing Auth Flyway history table into it without resetting or recreating migration records.
-- Auth Service runs a startup preflight that checks the registry table is readable and that its `id` column is UUID. If the owner migration has not run, startup now reports this prerequisite directly instead of failing later during Hibernate validation or a login request.
-- The bootstrap can run against an existing PostgreSQL volume and does not delete or reset it. It does not change an already-existing table's schema. If `public.tenants` already exists with a different ID type or incompatible columns, migrate it through Tenant Service rather than dropping it.
-
-Compose requires a root `.env` file containing the database passwords and JWT keys. Compose reads `.env` for interpolation but passes only the explicitly mapped values into each container. The bootstrap receives `POSTGRES_USER`/`POSTGRES_PASSWORD` as PostgreSQL administrator credentials and creates or updates the restricted `DB_USERNAME` role with `DB_PASSWORD`. Inside the bootstrap container, `PGPASSWORD` is mapped from `POSTGRES_PASSWORD` and `AUTH_DB_PASSWORD` is mapped from `DB_PASSWORD`; these are internal aliases, not separate values to add to `.env`. The bootstrap transfers ownership of existing Auth Service tables to the restricted login so migrations can run without the application using the PostgreSQL administrator. Never put credentials or signing keys in tracked files. Any signing key previously committed in Compose must be treated as compromised and rotated before use.
+Compose requires a root `.env` file containing the database passwords and JWT keys. Compose reads `.env` for interpolation but passes only explicitly mapped values into each container. Set separate `TENANT_DB_PASSWORD` and `TENANT_MIGRATION_PASSWORD` values; the application and migration roles should not share credentials. Never put credentials or signing keys in tracked files.
 
 `POSTGRES_USER` defaults to `auth_service` for compatibility with the current local database setup. For an existing `pgdata` volume, `POSTGRES_PASSWORD` must match the administrator password with which that volume was initialized; changing the environment variable does not change a persisted PostgreSQL role password. The bootstrap creates/updates the separate `DB_USERNAME` role and transfers existing Auth Service table ownership to it.
 
@@ -98,38 +90,107 @@ In `.env`, set distinct strong values for `POSTGRES_PASSWORD` and `DB_PASSWORD`.
 
 ## 4a. Public registration and verified identities
 
-The public registration request contains only an email and password. It creates a global pending identity without requiring a tenant membership; the identity is not a tenant account and cannot authenticate to tenant resources. Only the email owner can change it to `VERIFIED` by submitting the one-time code.
+The public registration request contains only an email and password. Registration creates a `PENDING_EMAIL` row in `public.user_identities` with the password hash and a linked row in `public.email_verification_challenges` with only the code hash, expiry, attempt count, and consumption timestamp. Plaintext passwords and codes are not persisted. A challenge cannot exist without its global identity.
 
-Verification codes contain 256 bits of randomness, are stored as SHA-256 hashes, expire after 15 minutes, and are single-use with a five-attempt limit. Re-registering an unverified identity changes its pending password and invalidates prior codes. Re-registering an already verified identity or an existing active tenant account does not change credentials or issue another code. Registration and verification use database-backed fixed-window limits: five requests/hour per IP and normalized email for registration, and ten/hour for verification. IP throttling uses the servlet peer address; deployments behind a proxy must only enable forwarded-header handling for trusted proxies.
+Verification codes contain 256 bits of randomness, are stored as SHA-256 hashes, expire after 15 minutes, and are single-use with a five-attempt limit. `consumed_at` and `expires_at` define challenge state; there is no duplicated status column. A partial unique index allows only one unconsumed challenge per identity. Re-registering a pending identity replaces its password hash and challenge. Re-registering an already verified identity does not change credentials or issue another code. Expired challenges are independently rejected on every verification request and removed by scheduled cleanup. Registration and verification use database-backed fixed-window limits: five requests/hour per IP and normalized email for registration, and ten/hour for verification.
 
-Email verification marks only the global identity as verified. It never creates or activates a tenant account or membership. A tenant administrator must explicitly provision the verified identity through `POST /api/auth/memberships`; the tenant ID and role come from that authenticated administrator request. A verified identity without a membership has no tenant-scoped login or access token. If an administrator provisioned a pending membership before verification, the administrator repeats the same request after verification to complete activation.
+Email verification marks the pending global identity as verified and deletes the one-time challenge in the same transaction. It never creates a tenant or membership. After verification, the user can log in with email and password alone and receive a global JWT. Tenant Service then returns the user's membership list, which may be empty; the user can create a tenant there without Auth selecting or creating one.
 
-The database transaction that stores an identity/challenge commits before synchronous SMTP delivery, so database locks are not held open while contacting the mail server. SMTP and PostgreSQL are not atomic: delivery failure is reported as an error while the pending identity and hashed challenge remain; repeating registration rotates the code and retries. Expired and consumed challenge records older than 30 days are removed periodically. Local Compose runs Mailpit as an SMTP capture service at `http://localhost:8025`; production must configure a real SMTP host, credentials, sender, and TLS policy through deployment secrets.
+The database transaction that stores a challenge commits before synchronous SMTP delivery, so database locks are not held open while contacting the mail server. SMTP and PostgreSQL are not atomic: delivery failure is reported while the pending challenge remains; repeating registration rotates the code and retries. Local Compose runs Mailpit as an SMTP capture service at `http://localhost:8025`; production must configure a real SMTP host, credentials, sender, and TLS policy through deployment secrets.
 
-Flyway V3 adds memberships, verification-code and rate-limit tables, and migrates unexpired legacy invitation rows into pending memberships. V4 adds `public.user_identities`, links new verification challenges and tenant accounts to those identities, and does not rewrite existing users, memberships, invitations, or challenges. Legacy pending account rows remain; after verifying the email as an identity, an authorized tenant administrator can repeat provisioning to complete the existing pending membership.
+The migration files are an upgrade history, not separate databases. Keep applied versioned migrations unchanged; use a new version for future schema changes.
+
+| Auth version | Purpose |
+| --- | --- |
+| V1-V2 | Create initial authentication tables and external identity links. |
+| V3-V6 | Evolve legacy membership and email-verification flows into self-service identity registration and one-time challenges. |
+| V7 | Add global identity login and lockout state. |
+| V8 | Backfill unambiguous legacy credentials; record conflicts for reconciliation. |
+| V9 | Move pending credentials to global identities, normalize challenges, and record/grant the staged Tenant transfer. |
+| V10 | Require completed transfer when legacy rows existed, archive unresolved records, and remove obsolete Auth-owned tenant/account tables. |
+
+Auth V10 also revokes the migration role's temporary access to the Auth transfer marker. Unresolved credential hashes remain in the restricted `auth_service.legacy_identity_migration_accounts` audit table; unresolved external links are retained in `auth_service.legacy_external_identity_mappings`. The issue ledger remains for reconciliation.
+
+### Staged upgrade for databases with existing tenant rows
+
+Do not deploy Auth V10 before Tenant V3 has completed. For an existing database with legacy membership or invitation rows:
+
+1. Deploy Auth with Flyway limited to version 9 (`spring.flyway.target=9`). Confirm Auth is healthy.
+2. Run Tenant migrations through V3. Tenant V2 archives the legacy rows; Tenant V3 checks that every source row is archived and then deletes the transferred source rows.
+3. Remove the Flyway target and restart Auth so V10 can verify the source tables are empty and remove them.
+4. Recreate `tenant-schema-bootstrap` after Tenant V3. The bootstrap revokes the migrator's temporary `public` schema access once the transfer is complete.
+
+For a fresh, empty database, the complete Auth migration chain can run immediately; V10 permits empty source tables. Do not reset a persistent volume to bypass the staged upgrade.
+
+## 4b. Auth database model and lifecycle
+
+```mermaid
+erDiagram
+  USER_IDENTITIES ||--o{ EMAIL_VERIFICATION_CHALLENGES : verifies
+  USER_IDENTITIES ||--o{ EXTERNAL_IDENTITIES : links
+  USER_IDENTITIES {
+    uuid id PK
+    string email
+    string normalized_email UK
+    string password_hash
+    string status
+    timestamptz email_verified_at
+    int failed_login_count
+    timestamptz locked_until
+    timestamptz last_login_at
+  }
+  EMAIL_VERIFICATION_CHALLENGES {
+    uuid id PK
+    uuid identity_id FK
+    string code_hash UK
+    timestamptz created_at
+    timestamptz expires_at
+    int failed_attempts
+    timestamptz consumed_at
+  }
+  EXTERNAL_IDENTITIES {
+    uuid id PK
+    uuid global_user_id FK
+    string provider
+    string provider_subject
+    boolean email_verified
+    timestamptz linked_at
+  }
+  AUTH_RATE_LIMITS {
+    string bucket_hash PK
+    timestamptz window_started_at
+    int request_count
+  }
+```
+
+- `user_identities` is the canonical global account and credential store. `normalized_email` is unique. Valid lifecycle states are `PENDING_EMAIL`, `VERIFIED`, `LOCKED`, and `DISABLED`; pending identities have no `email_verified_at`, and all other states require it.
+- `email_verification_challenges` references one pending identity. Registration persists the BCrypt password hash on the identity. Challenge rows contain no password, only the one-time code hash and lifecycle metadata.
+- `external_identities` maps a unique provider subject to exactly one global identity. No email-based auto-linking is performed.
+- `auth_rate_limits` remains necessary: registration and verification consume database-backed fixed-window buckets, and a scheduled task removes old buckets.
+- Ten consecutive failed password attempts lock a verified identity for 15 minutes. A successful login resets the counter and clears an elapsed lock. Disabled identities cannot authenticate.
+- `auth_service.legacy_identity_migration_issues`, `auth_service.tenant_data_transfer_status`, and the `legacy_*` archive tables are migration/audit data, not runtime authentication sources.
+
+Auth owns no tenant ID, tenant role, tenant membership, or tenant invitation. Tenant Service uses global UUIDs as logical user references and performs all tenant authorization from its own schema.
 
 ```mermaid
 sequenceDiagram
-  actor Admin as Tenant administrator
   actor User as Registrant
   participant Auth as Auth Service
   participant DB as Auth-owned PostgreSQL schema
   participant SMTP as Configured SMTP server
-  Admin->>Auth: POST /api/auth/memberships (JWT, tenant, email, role)
-  Auth->>Auth: Verify TENANT_ADMIN and JWT tenant equals requested tenant
-  Auth->>DB: Store pending membership
   User->>Auth: POST /api/auth/register (email, password only)
-  Auth->>DB: Create/reuse PENDING_EMAIL global identity
-  Auth->>DB: Store code hash and expiry, invalidate prior challenge
-  Auth->>DB: Commit identity and challenge
+  Auth->>DB: Store password hash, code hash and expiry; invalidate prior challenge
+  Auth->>DB: Commit temporary challenge only
   Auth->>SMTP: Send one-time code after commit
   Auth-->>User: 202 generic accepted response
   User->>Auth: POST /api/auth/verify-email (email, code)
-  Auth->>DB: Check rate limit, expiry, attempt count; consume code
-  Auth->>DB: Mark global identity VERIFIED only
+  Auth->>DB: Check rate limit, expiry and attempt count
+  Auth->>DB: Create verified global identity and delete challenge atomically
   Auth-->>User: 204 No Content
-  Admin->>Auth: Provision membership after identity verification
-  Auth->>DB: Create ACTIVE tenant account from trusted admin membership and verified identity
+  User->>Auth: POST /api/auth/login (email, password only)
+  Auth->>DB: Verify global identity, password, status and lockout
+  Auth-->>User: RS256 JWT (sub = global user UUID; no tid or tenant role)
+  User->>Auth: Continue to dashboard and request memberships from Tenant Service
 ```
 
 ## 5. HTTP API Contract
@@ -137,7 +198,7 @@ sequenceDiagram
 ### Public Endpoints
 
 #### `POST /api/auth/register`
-Publicly starts email verification without requiring a tenant membership. The request has no invitation token, tenant ID, role, or authorization header. New requests create a pending global identity; repeated requests for a pending identity update its password, invalidate the old code, and send a fresh code. Existing verified identities and existing active accounts are not modified; the generic response is retained to avoid exposing account state.
+Publicly starts email verification without requiring a tenant membership. The request has no invitation token, tenant ID, role, or authorization header. New requests store a pending challenge only; repeated requests replace its password hash and code hash and send a fresh code. Existing verified identities and existing active accounts are not modified; the generic response is retained to avoid exposing account state.
 ```json
 {
   "email": "user@example.com",
@@ -152,7 +213,7 @@ Publicly starts email verification without requiring a tenant membership. The re
 ```
 
 #### `POST /api/auth/verify-email`
-Publicly verifies the one-time code sent to the email address. A valid code is single-use, expires after 15 minutes, and marks only the global identity as verified. It does not create a tenant account or activate any membership. Returns `204 No Content`; invalid, expired, or exhausted codes return `400 Bad Request`.
+Publicly verifies the one-time code sent to the email address. A valid code is single-use, expires after 15 minutes, creates a verified global identity, and deletes the temporary challenge atomically. It does not create a tenant account or activate any membership. Returns `204 No Content`; invalid, expired, or exhausted codes return `400 Bad Request`.
 ```json
 {
   "email": "user@example.com",
@@ -161,15 +222,13 @@ Publicly verifies the one-time code sent to the email address. A valid code is s
 ```
 
 #### `POST /api/auth/login`
-Authenticates via email and password, returning an RS256 JWT access token.
+Authenticates a verified global identity using only email and password. Tenant membership, tenant status, and a client-supplied tenant ID are not used.
 ```json
 {
-  "tenantId": "11111111-1111-4111-8111-111111111111",
   "email": "user@example.com",
   "password": "SecurePassword123!"
 }
 ```
-*Note: `tenantId` is omitted only for `PLATFORM_ADMIN`.*
 
 **Response `200 OK`**:
 ```json
@@ -179,6 +238,7 @@ Authenticates via email and password, returning an RS256 JWT access token.
   "expiresIn": 600
 }
 ```
+The JWT `sub` and compatibility `global_user_id` claim are the global identity UUID. Login tokens do not contain `tid` or tenant-role claims.
 
 #### `GET /.well-known/jwks.json`
 Publishes the RSA public verification key set in RFC 7517 format for downstream services.
@@ -187,27 +247,7 @@ Publishes the RSA public verification key set in RFC 7517 format for downstream 
 
 ### Authenticated Endpoints (Requires Bearer JWT)
 
-#### `POST /api/auth/memberships`
-Only a tenant administrator may provision a membership for the tenant in their JWT; platform-admin and cross-tenant requests are rejected. The role and tenant are trusted administrator inputs and are never accepted by public registration. If the identity has already verified its email, the administrator's provisioning request creates an active tenant account and membership. Otherwise it creates a pending membership. If a pending membership already exists, the same administrator can repeat the request after email verification to complete provisioning; the role must match the pending membership.
-```json
-{
-  "tenantId": "11111111-1111-4111-8111-111111111111",
-  "email": "colleague@example.com",
-  "role": "ORDER_MANAGER"
-}
-```
-**Response `201 Created`** (status is `ACTIVE` when identity is verified; otherwise `PENDING`):
-```json
-{
-  "membershipId": "550e8400-e29b-41d4-a716-446655440000",
-  "tenantId": "11111111-1111-4111-8111-111111111111",
-  "email": "colleague@example.com",
-  "role": "ORDER_MANAGER",
-  "status": "ACTIVE"
-}
-```
-
-`status` is `PENDING` until both the email is verified and a tenant administrator provisions the membership. An identity without a membership cannot log in to tenant resources or receive a tenant-scoped JWT. This repository does not currently contain a tenant invitation-acceptance API or tenant-creation workflow; onboarding remains administrator-provisioned.
+Membership provisioning, invitations, and tenant authorization are Tenant Service responsibilities. Auth exposes no membership endpoint and does not issue tenant-role or tenant-ID claims.
 
 #### `POST /api/auth/external-identities/google`
 Explicitly binds the authenticated user account to a verified Google subject identifier.
@@ -255,10 +295,10 @@ Execute the automated test suite from the repository root:
 ```
 The test suite includes:
 - `AuthenticationStrategyResolverTests`: Strategy registration and duplicate rejection.
-- `PasswordAuthenticationProviderTests`: BCrypt verification, lockout counter, account status checks, and inactive tenant rejection.
+- `PasswordAuthenticationProviderTests`: BCrypt verification, lockout counter, and account status checks.
 - `JwtTokenTests`: RS256 token issuance, claims verification, and signature tampering rejection.
 - `ExternalIdentityServiceTests`: Google subject mapping, conflict prevention, idempotent re-linking, and anti-email-auto-linking verification.
-- `RegistrationServiceTests`, `EmailVerificationServiceTests`, and `MembershipServiceTests`: pending account creation, BCrypt storage, single-use verification, and tenant-admin assignment boundaries.
+- `RegistrationServiceTests` and `EmailVerificationServiceTests`: registration rate limiting, pending global identities, single-use verification, and invalid/expired challenge handling.
 - `AuthServiceApplicationTests`: End-to-end Testcontainers integration tests (automatically skipped if Docker daemon is not active).
 
 ### Running with Docker Compose
@@ -277,28 +317,15 @@ docker compose logs -f auth-service
 docker compose logs -f mailpit
 ```
 
-The local bootstrap creates an empty tenant registry; it does not seed tenants or tenant administrators. Users can request email verification without a membership, but a tenant administrator must provision a membership before they can access tenant features. View captured local verification mail at `http://localhost:8025`. Check the health and JWKS endpoints after Auth Service starts:
+The local bootstrap creates service schemas and restricted database roles; Tenant Service owns tenant creation and membership. Users can request email verification without a membership, log in, and create a tenant through Tenant Service. View captured local verification mail at `http://localhost:8025`. Check the health and JWKS endpoints after Auth Service starts:
 ```bash
 curl http://localhost:8081/actuator/health
 curl http://localhost:8081/.well-known/jwks.json
 ```
 
-#### Bootstrapping the first local tenant administrator
+`tenant-service` waits for Auth Service health before applying its schema migration and importing eligible legacy membership and invitation data. The migration role is separate from the Tenant Service application role. Do not remove archived records or unresolved migration entries until the transfer has been reviewed.
 
-The tenant owner must first create an active tenant in `public.tenants`; Auth Service does not create or modify tenant registry data. For local development only, Auth Service can create the first `TENANT_ADMIN` for an already active tenant when explicitly enabled. Set these environment variables for Auth Service:
-
-```text
-AUTH_BOOTSTRAP_TENANT_ADMIN_ENABLED=true
-AUTH_BOOTSTRAP_TENANT_ID=<UUID of an existing ACTIVE tenant>
-AUTH_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
-AUTH_BOOTSTRAP_ADMIN_PASSWORD=<unique strong password>
-```
-
-On startup, Auth Service validates the tenant is active, serializes concurrent bootstrap attempts, and creates the admin only when no tenant administrator exists for that tenant. The password is BCrypt-hashed. If an administrator already exists, startup does not change its credentials. Disable the bootstrap and remove its password from the environment immediately after the account is created; do not enable this mechanism in production.
-
-The administrator can then log in and call `POST /api/auth/memberships` for each normalized registrant email and allowed tenant role. Public registration creates a pending global identity, persists only the hash of a one-time verification code, and sends the verification email. Email verification alone grants no tenant access. Do not send tenant IDs or roles in the public registration request.
-
-Verification challenge and identity writes commit before SMTP delivery begins, so no database row locks are held while waiting for the mail server. SMTP and PostgreSQL cannot commit atomically: if delivery fails, the API reports an error while the pending identity and hashed challenge remain. Submitting registration again rotates the pending challenge and retries email delivery. Expired and consumed challenge records older than 30 days are removed periodically.
+Verification challenge and identity writes commit before SMTP delivery begins, so no database row locks are held while waiting for the mail server. SMTP and PostgreSQL cannot commit atomically: if delivery fails, the API reports an error while the pending identity and hashed challenge remain. Submitting registration again rotates the pending challenge and retries email delivery. Expired and consumed challenge records are removed by a scheduled cleanup task.
 
 ### Deploying to Kubernetes
 Apply the Kubernetes manifests from `k8s/base/auth-service`:

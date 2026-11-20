@@ -1,9 +1,8 @@
 package com.authservice.security;
 
 import com.authservice.domain.EmailAddress;
-import com.authservice.persistence.UserAccount;
-import com.authservice.persistence.UserAccountRepository;
-import com.authservice.service.TenantStatusService;
+import com.authservice.persistence.UserIdentity;
+import com.authservice.persistence.UserIdentityRepository;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
@@ -13,35 +12,31 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 
 @Component
 public class PasswordAuthenticationProvider implements AuthenticationProvider {
 
     private static final String GENERIC_ERROR_MESSAGE = "Invalid credentials or account unavailable";
 
-    private final UserAccountRepository userAccountRepository;
-    private final TenantStatusService tenantStatusService;
+    private final UserIdentityRepository userIdentityRepository;
     private final PasswordEncoder passwordEncoder;
 
     public PasswordAuthenticationProvider(
-            UserAccountRepository userAccountRepository,
-            TenantStatusService tenantStatusService,
+            UserIdentityRepository userIdentityRepository,
             PasswordEncoder passwordEncoder) {
-        this.userAccountRepository = userAccountRepository;
-        this.tenantStatusService = tenantStatusService;
+        this.userIdentityRepository = userIdentityRepository;
         this.passwordEncoder = passwordEncoder;
     }
 
     @Override
-    @Transactional
+    @Transactional(noRollbackFor = BadCredentialsException.class)
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
         if (!(authentication instanceof PasswordAuthenticationToken token)) {
             return null;
         }
 
-        UUID tenantId = token.getTenantId();
         String rawEmail = token.getEmail();
         String rawPassword = token.getCredentials() != null ? token.getCredentials().toString() : "";
 
@@ -55,15 +50,7 @@ public class PasswordAuthenticationProvider implements AuthenticationProvider {
 
         Instant now = Instant.now();
 
-        // 1. Verify tenant status if tenant-scoped
-        if (tenantId != null && !tenantStatusService.isTenantActive(tenantId)) {
-            throw new BadCredentialsException(GENERIC_ERROR_MESSAGE);
-        }
-
-        // 2. Lookup user account
-        Optional<UserAccount> userOpt = (tenantId == null)
-                ? userAccountRepository.findByNormalizedEmailAndTenantIdIsNull(normalizedEmail)
-                : userAccountRepository.findByTenantIdAndNormalizedEmail(tenantId, normalizedEmail);
+        Optional<UserIdentity> userOpt = userIdentityRepository.findByNormalizedEmailForUpdate(normalizedEmail);
 
         if (userOpt.isEmpty()) {
             // Mitigate timing attacks by performing dummy password check
@@ -71,31 +58,27 @@ public class PasswordAuthenticationProvider implements AuthenticationProvider {
             throw new BadCredentialsException(GENERIC_ERROR_MESSAGE);
         }
 
-        UserAccount user = userOpt.get();
+        UserIdentity user = userOpt.get();
 
-        // 3. Check account availability (status and lock)
         if (!user.isAvailable(now)) {
             throw new BadCredentialsException(GENERIC_ERROR_MESSAGE);
         }
 
-        // 4. Verify password
         if (!passwordEncoder.matches(rawPassword, user.getPasswordHash())) {
             user.recordFailedLogin(now);
-            userAccountRepository.save(user);
+            userIdentityRepository.save(user);
             throw new BadCredentialsException(GENERIC_ERROR_MESSAGE);
         }
 
-        // 5. Success: reset counters and update login timestamp
         user.recordSuccessfulLogin(now);
-        userAccountRepository.save(user);
+        userIdentityRepository.save(user);
 
-        UserAccountPrincipal principal = new UserAccountPrincipal(user);
+        GlobalUserPrincipal principal = new GlobalUserPrincipal(user.getId(), user.getEmail());
         return new PasswordAuthenticationToken(
                 principal,
                 null,
-                tenantId,
                 user.getEmail(),
-                principal.getAuthorities()
+                List.of()
         );
     }
 

@@ -2,6 +2,7 @@ package com.authservice.api;
 
 import com.authservice.persistence.ExternalIdentity;
 import com.authservice.service.ExternalIdentityService;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -30,7 +31,7 @@ public class GoogleIdentityController {
 
     public record ExternalIdentityResponse(
             UUID id,
-            UUID userId,
+            UUID globalUserId,
             String provider,
             String providerSubject,
             boolean emailVerified,
@@ -44,7 +45,7 @@ public class GoogleIdentityController {
     @PostMapping("/google")
     public ResponseEntity<ExternalIdentityResponse> linkGoogleIdentity(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestBody LinkGoogleRequest request) {
+            @Valid @RequestBody LinkGoogleRequest request) {
 
         if (jwt == null) {
             throw new AccessDeniedException("Authentication required");
@@ -62,7 +63,7 @@ public class GoogleIdentityController {
 
         ExternalIdentityResponse response = new ExternalIdentityResponse(
                 identity.getId(),
-                identity.getUserId(),
+                identity.getGlobalUserId(),
                 identity.getProvider(),
                 identity.getProviderSubject(),
                 identity.isEmailVerified(),

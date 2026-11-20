@@ -22,6 +22,8 @@ COPY --from=builder --chown=10001:10001 /workspace/target/*.jar /app/app.jar
 USER 10001:10001
 
 EXPOSE 8081 9090
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=5 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8081/actuator/health || exit 1
 
 # Tuning JVM flags for container environments
 ENTRYPOINT ["java", \

@@ -1,5 +1,7 @@
 # TenantGuard OMS - Mermaid Diagrams
 
+> **Status: historical target-design sketches, not a description of the current deployment.** This document contains earlier examples of tenant-scoped JWT claims, a public runtime registry, Order Service, and tenant-schema routing. Those examples are not implemented and must not override the accepted global-identity contract. See [the architecture-freeze diagrams](./architecture-freeze-diagrams.md) for the canonical target boundaries and [the consistency report](./ARCHITECTURE-CONSISTENCY-REPORT.md) for verified implementation status.
+
 ## 1. System Context (C4 Level 1)
 
 ```mermaid
@@ -64,8 +66,8 @@ flowchart LR
   NGINX -->|"/api/tenants/* : HTTP :8082"| TEN
   NGINX -->|"/api/orders/* : HTTP :8083"| ORD
 
-  AUTH -->|"JDBC TCP :5432 / role auth_svc / public.users"| PG
-  TEN -->|"JDBC TCP :5432 / role tenant_svc / public.tenants + CREATE SCHEMA"| PG
+  AUTH -->|"JDBC TCP :5432 / Auth role / global identities and auth data"| PG
+  TEN -->|"JDBC TCP :5432 / Tenant role / tenant_service schema"| PG
   ORD -->|"JDBC TCP :5432 / role order_svc / public.tenants read + tenant_{id}.*"| PG
 
   ISTIO -.->|"alt. L7 entry, ADR required"| NS_APP
@@ -156,30 +158,26 @@ sequenceDiagram
   end
 ```
 
-## 3a. Public Registration and Verified Tenant Membership
+## 3a. Public Registration and Global Identity Verification
 
-Tenant membership is provisioned by an authenticated tenant administrator in Auth Service. Tenant ID and role used by public registration come exclusively from the pending membership record. The registration request accepts only email and password; its account remains unable to authenticate until the email code is verified.
+Registration is global and independent of tenant membership. The pending identity stores its password hash; the linked challenge stores only the one-time code hash and expiry/attempt metadata. Verification changes the identity state and consumes the challenge atomically.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  actor A as Tenant administrator
   actor U as Registrant
   participant AUTH as Auth Service
   participant DB as Auth-owned PostgreSQL tables
   participant SMTP as Configured SMTP server
 
-  A->>AUTH: POST /api/auth/memberships with tenant JWT
-  AUTH->>AUTH: Require TENANT_ADMIN and matching JWT tid
-  AUTH->>DB: Store pending tenant/email/role membership
   U->>AUTH: POST /api/auth/register with email/password only
-  AUTH->>DB: Lock matching memberships; create PENDING_EMAIL account(s)
-  AUTH->>DB: Store SHA-256 hash of random code, expiry, attempt count
+  AUTH->>DB: Store PENDING_EMAIL global identity with password hash
+  AUTH->>DB: Store linked challenge with SHA-256 code hash and expiry
   AUTH->>SMTP: Send code to normalized email
-  AUTH-->>U: 202 generic response (no membership disclosure)
-  U->>AUTH: POST /api/auth/verify-email with email/code/chosen password
+  AUTH-->>U: 202 generic response
+  U->>AUTH: POST /api/auth/verify-email with email/code
   AUTH->>DB: Enforce rate limit; validate expiry and single use
-  AUTH->>DB: Atomically activate associated accounts and memberships
+  AUTH->>DB: Mark global identity verified and delete challenge atomically
   AUTH-->>U: 204 No Content
 ```
 
@@ -397,49 +395,37 @@ flowchart TB
 
 ```mermaid
 erDiagram
-  tenants["public.tenants"] {
-    bigint id PK "tenant id, used in schema name tenant_{id}"
-    varchar slug UK "login hint, lowercase"
-    varchar display_name
-    varchar schema_name UK "validated against ^tenant_[0-9]+$"
-    varchar status "ACTIVE, SUSPENDED, DEACTIVATED"
-    varchar provisioning_status "PENDING, READY, FAILED"
-    timestamptz created_at
-    timestamptz deactivated_at "nullable"
-  }
-
-  users["public.users"] {
+  user_identities["public.user_identities"] {
     uuid id PK
-    uuid tenant_id "NULL only for PLATFORM_ADMIN; no cross-service FK"
-    varchar email "unique per tenant, case-insensitive"
-    varchar password_hash "bcrypt or argon2, never plaintext"
-    varchar role "PLATFORM_ADMIN, TENANT_ADMIN, ORDER_MANAGER, ORDER_VIEWER"
-    varchar status "PENDING_EMAIL, ACTIVE, LOCKED, DISABLED"
+    varchar email
+    varchar normalized_email UK
+    varchar password_hash "BCrypt, never plaintext"
+    varchar status "PENDING_EMAIL, VERIFIED, LOCKED, DISABLED"
+    timestamptz email_verified_at
     int failed_login_count
+    timestamptz locked_until
     timestamptz last_login_at "nullable"
     timestamptz created_at
+    timestamptz updated_at
   }
 
-  tenant_memberships["public.tenant_memberships"] {
+  email_verification_challenges["public.email_verification_challenges"] {
     uuid id PK
-    uuid tenant_id "logical ref to public.tenants; no cross-service FK"
-    varchar normalized_email
-    varchar role "tenant roles only; administrator-provisioned"
-    varchar status "PENDING, ACTIVE"
-    uuid user_id FK "nullable until registration"
-    uuid created_by FK
-    timestamptz created_at
-    timestamptz activated_at
-  }
-
-  email_verification_codes["public.email_verification_codes"] {
-    uuid id PK
-    varchar normalized_email
-    char code_hash UK "SHA-256 of random one-time code"
+    uuid identity_id FK
+    varchar code_hash UK "SHA-256 of random one-time code"
     timestamptz created_at
     timestamptz expires_at
     int failed_attempts
     timestamptz consumed_at
+  }
+
+  external_identities["public.external_identities"] {
+    uuid id PK
+    uuid global_user_id FK
+    varchar provider
+    varchar provider_subject
+    boolean email_verified
+    timestamptz linked_at
   }
 
   auth_rate_limits["public.auth_rate_limits"] {
@@ -447,6 +433,49 @@ erDiagram
     timestamptz window_started_at
     int request_count
   }
+
+  tenants["tenant_service.tenants"] {
+    uuid id PK
+    varchar name
+    varchar slug UK
+    uuid owner_user_id
+    varchar status
+    timestamptz created_at
+    timestamptz updated_at
+  }
+
+  tenant_memberships["tenant_service.tenant_memberships"] {
+    uuid id PK
+    uuid tenant_id FK
+    uuid user_id "logical ref to user_identities.id"
+    varchar role
+    varchar status
+    boolean is_owner
+    timestamptz joined_at
+    timestamptz created_at
+    timestamptz updated_at
+  }
+
+  tenant_invitations["tenant_service.tenant_invitations"] {
+    uuid id PK
+    uuid tenant_id FK
+    varchar normalized_email
+    varchar role
+    varchar token_hash
+    varchar status
+    uuid invited_by
+    uuid accepted_user_id
+    timestamptz created_at
+    timestamptz expires_at
+    timestamptz accepted_at
+    uuid source_membership_id
+  }
+
+  user_identities ||--o{ email_verification_challenges : verifies
+  user_identities ||--o{ external_identities : links
+  tenants ||--o{ tenant_memberships : includes
+  tenants ||--o{ tenant_invitations : invites
+  user_identities ||--o{ tenant_memberships : logical_user_reference
 
   orders["tenant_{id}.orders"] {
     uuid id PK
@@ -456,7 +485,7 @@ erDiagram
     varchar status "PENDING, CONFIRMED, FULFILLED, CANCELLED"
     numeric total_amount
     varchar currency "ISO 4217 code"
-    uuid created_by_user_id "logical ref to public.users.id, not enforced"
+    uuid created_by_user_id "logical ref to public.user_identities.id, not enforced"
     int version "optimistic locking"
     timestamptz created_at
     timestamptz updated_at
@@ -482,10 +511,8 @@ erDiagram
     timestamptz expires_at "cleanup job removes expired rows"
   }
 
-  users ||--o{ tenant_memberships : "created memberships; logical/auth-owned link"
-  users ||--o| tenant_memberships : "registered account"
   tenants ||..o{ orders : "owns schema containing"
-  users ||..o{ orders : "created by (cross-schema, logical)"
+  user_identities ||..o{ orders : "created by (cross-schema, logical)"
   orders ||--|{ order_items : "contains"
   orders ||--o| idempotency_keys : "created via"
 ```

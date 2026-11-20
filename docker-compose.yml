@@ -30,13 +30,17 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
       AUTH_DB_USER: ${DB_USERNAME:-auth_service_app}
       AUTH_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the environment}
+      TENANT_DB_PASSWORD: ${TENANT_DB_PASSWORD:-${DB_PASSWORD:?Set DB_PASSWORD in the environment}}
+      TENANT_MIGRATION_PASSWORD: ${TENANT_MIGRATION_PASSWORD:?Set TENANT_MIGRATION_PASSWORD in the environment}
+      # Bump when the mounted bootstrap changes so Compose recreates the one-shot container.
+      TENANT_SCHEMA_BOOTSTRAP_VERSION: "4"
     volumes:
       - ./infrastructure/docker/postgres/tenant-registry-bootstrap.sql:/tenant-registry-bootstrap.sql:ro
     command:
       - sh
       - -c
       - >-
-        psql --set=ON_ERROR_STOP=1 --set=auth_user="$$AUTH_DB_USER" --set=auth_password="$$AUTH_DB_PASSWORD" --file=/tenant-registry-bootstrap.sql
+        psql --set=ON_ERROR_STOP=1 --set=auth_user="$$AUTH_DB_USER" --set=auth_password="$$AUTH_DB_PASSWORD" --set=tenant_password="$$TENANT_DB_PASSWORD" --set=tenant_migration_password="$$TENANT_MIGRATION_PASSWORD" --file=/tenant-registry-bootstrap.sql
     restart: "no"
 
   # Local email testing. Not used by default.
@@ -71,25 +75,53 @@ services:
       AUTH_JWT_PRIVATE_KEY_BASE64: ${AUTH_JWT_PRIVATE_KEY_BASE64:?Set AUTH_JWT_PRIVATE_KEY_BASE64 in the environment}
       AUTH_JWT_PUBLIC_KEY_BASE64: ${AUTH_JWT_PUBLIC_KEY_BASE64:?Set AUTH_JWT_PUBLIC_KEY_BASE64 in the environment}
 
-      AUTH_BOOTSTRAP_TENANT_ADMIN_ENABLED: ${AUTH_BOOTSTRAP_TENANT_ADMIN_ENABLED:-false}
-      AUTH_BOOTSTRAP_TENANT_ID: ${AUTH_BOOTSTRAP_TENANT_ID:-}
-      AUTH_BOOTSTRAP_ADMIN_EMAIL: ${AUTH_BOOTSTRAP_ADMIN_EMAIL:-}
-      AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-}
-
       # Gmail SMTP
       MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
       MAIL_PORT: ${MAIL_PORT:-587}
-      MAIL_USERNAME: ${MAIL_USERNAME:?Set MAIL_USERNAME in .env}
-      MAIL_PASSWORD: ${MAIL_PASSWORD:?Set MAIL_PASSWORD in .env}
-      MAIL_SMTP_AUTH: "true"
-      MAIL_SMTP_STARTTLS: "true"
-      MAIL_FROM: ${MAIL_FROM:-${MAIL_USERNAME}}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_SMTP_AUTH: ${MAIL_SMTP_AUTH:-true}
+      MAIL_SMTP_STARTTLS: ${MAIL_SMTP_STARTTLS:-true}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@tenantguard.local}
 
     depends_on:
       postgres:
         condition: service_healthy
       tenant-schema-bootstrap:
         condition: service_completed_successfully
+
+  tenant-service:
+    build:
+      context: ./services/tenant-service
+      dockerfile: Dockerfile
+    container_name: tenantguard-tenant-service
+    ports:
+      - "8082:8082"
+    environment:
+      SERVER_PORT: 8082
+      DATABASE_URL: jdbc:postgresql://postgres:5432/tenantguard
+      TENANT_DB_USERNAME: tenant_service
+      TENANT_DB_PASSWORD: ${TENANT_DB_PASSWORD:-${DB_PASSWORD:?Set DB_PASSWORD in the environment}}
+      TENANT_MIGRATION_USERNAME: tenant_service_migrator
+      TENANT_MIGRATION_PASSWORD: ${TENANT_MIGRATION_PASSWORD:?Set TENANT_MIGRATION_PASSWORD in the environment}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-http://localhost:8081}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-tenantguard-api}
+      AUTH_JWT_JWK_SET_URI: http://auth-service:8081/.well-known/jwks.json
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_SMTP_AUTH: ${MAIL_SMTP_AUTH:-true}
+      MAIL_SMTP_STARTTLS: ${MAIL_SMTP_STARTTLS:-true}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@tenantguard.local}
+      TENANT_INVITATION_ACCEPT_URL: ${TENANT_INVITATION_ACCEPT_URL:-http://localhost:3000/invitations/accept}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tenant-schema-bootstrap:
+        condition: service_completed_successfully
+      auth-service:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -12,7 +12,7 @@ public interface ExternalIdentityRepository extends JpaRepository<ExternalIdenti
 
     Optional<ExternalIdentity> findByProviderAndProviderSubject(String provider, String providerSubject);
 
-    List<ExternalIdentity> findByUserIdAndProvider(UUID userId, String provider);
+    List<ExternalIdentity> findByGlobalUserIdAndProvider(UUID globalUserId, String provider);
 
     boolean existsByProviderAndProviderSubject(String provider, String providerSubject);
 }

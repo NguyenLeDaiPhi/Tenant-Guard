@@ -1,11 +1,9 @@
 package com.authservice.service;
 
-import com.authservice.domain.AccountStatus;
 import com.authservice.domain.EmailAddress;
-import com.authservice.persistence.EmailVerificationCode;
-import com.authservice.persistence.EmailVerificationCodeRepository;
-import com.authservice.persistence.UserAccount;
-import com.authservice.persistence.UserAccountRepository;
+import com.authservice.domain.IdentityStatus;
+import com.authservice.persistence.EmailVerificationChallenge;
+import com.authservice.persistence.EmailVerificationChallengeRepository;
 import com.authservice.persistence.UserIdentity;
 import com.authservice.persistence.UserIdentityRepository;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,22 +25,19 @@ public class RegistrationChallengeService {
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final UserIdentityRepository identityRepository;
-    private final EmailVerificationCodeRepository verificationRepository;
-    private final UserAccountRepository userAccountRepository;
+    private final EmailVerificationChallengeRepository verificationRepository;
     private final PasswordEncoder passwordEncoder;
     private final RegistrationEmailLock registrationEmailLock;
     private final Duration verificationTtl;
 
     public RegistrationChallengeService(
             UserIdentityRepository identityRepository,
-            EmailVerificationCodeRepository verificationRepository,
-            UserAccountRepository userAccountRepository,
+            EmailVerificationChallengeRepository verificationRepository,
             PasswordEncoder passwordEncoder,
             RegistrationEmailLock registrationEmailLock,
             @Value("${auth.email.verification-ttl:PT15M}") Duration verificationTtl) {
         this.identityRepository = identityRepository;
         this.verificationRepository = verificationRepository;
-        this.userAccountRepository = userAccountRepository;
         this.passwordEncoder = passwordEncoder;
         this.registrationEmailLock = registrationEmailLock;
         this.verificationTtl = verificationTtl;
@@ -61,24 +56,35 @@ public class RegistrationChallengeService {
             return Optional.empty();
         }
 
-        List<UserAccount> existingAccounts = userAccountRepository.findAllByNormalizedEmail(normalizedEmail);
-        if (existingAccounts.stream().anyMatch(account -> account.getStatus() != AccountStatus.PENDING_EMAIL)) {
-            return Optional.empty();
-        }
-
         Instant now = Instant.now();
-        for (EmailVerificationCode existing : verificationRepository
+        String passwordHash = passwordEncoder.encode(rawPassword);
+        if (identity == null) {
+            identity = UserIdentity.builder()
+                    .id(UUID.randomUUID())
+                    .email(emailAddress.raw())
+                    .normalizedEmail(normalizedEmail)
+                    .passwordHash(passwordHash) 
+                    .status(IdentityStatus.PENDING_EMAIL)
+                    .createdAt(now)
+                    .updatedAt(now)
+                    .build();
+        } else {
+            identity.setEmail(emailAddress.raw());
+            identity.setPasswordHash(passwordHash);
+        }
+        identity = identityRepository.saveAndFlush(identity);
+
+        for (EmailVerificationChallenge existing : verificationRepository
                 .findAllPendingByNormalizedEmailForUpdate(normalizedEmail)) {
             verificationRepository.delete(existing);
         }
         verificationRepository.flush();
 
         String code = generateCode();
-        verificationRepository.save(EmailVerificationCode.builder()
+        verificationRepository.save(EmailVerificationChallenge.builder()
                 .id(UUID.randomUUID())
-                .normalizedEmail(normalizedEmail)
+                .identity(identity)
                 .codeHash(VerificationCodeHasher.hash(code))
-                .temporaryPasswordHash(passwordEncoder.encode(rawPassword))
                 .createdAt(now)
                 .expiresAt(now.plus(verificationTtl))
                 .failedAttempts(0)

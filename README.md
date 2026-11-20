@@ -1,28 +1,28 @@
 # TenantGuard OMS
 
-TenantGuard OMS is a multi-tenant order management system designed for secure, isolated tenant operations. The platform is built around a modular Java/Spring Boot architecture, with separate services for identity and authentication, tenant lifecycle management, and order processing.
+TenantGuard OMS is a multi-tenant order management system under development. Auth Service and Tenant Service are implemented; Order Service, tenant-specific order schemas, and cross-service provisioning remain planned. See the [architecture consistency report](docs/architecture/ARCHITECTURE-CONSISTENCY-REPORT.md) for verified implementation status.
 
 ## Project Overview
 
 TenantGuard brings together the following core concerns:
 
-- Multi-tenant user identity and role management
+- Global user identity independent of tenant membership; tenant roles are managed separately
 - Public registration and email verification
 - Secure password handling and credential validation
 - JWT-based access token issuance and validation
-- Tenant registry and schema provisioning for isolated data boundaries
-- Order management scoped to a tenant's data
-- PostgreSQL-backed persistence with a public registry and per-tenant schemas
+- Tenant registry, memberships, invitations, and subscription management
+- Planned: order management scoped to a tenant's data
+- PostgreSQL-backed Auth and Tenant schemas; per-tenant Order schemas are planned, not operational
 
 The system is intended to support a clear separation of responsibility between services while keeping the platform easy to run locally with Docker and Kubernetes-oriented deployment patterns.
 
 ## Architecture
 
-The repository currently includes the following service domains:
+The repository currently includes these service domains:
 
 - `services/auth-service` — authentication, login flows, user identity, email verification, JWT issuance, external identity handling
 - `services/tenant-service` — tenant lifecycle and registry management
-- `services/order-service` — order operations, tenant-scoped business logic, data isolation
+- `services/order-service` — planned; no Order Service implementation is present yet
 
 At a high level, the platform uses:
 
@@ -34,14 +34,15 @@ At a high level, the platform uses:
 
 ## Security and Design Principles
 
-TenantGuard follows a defensive software design model:
+TenantGuard is designed around the following boundaries:
 
-- Tenant-specific access is enforced through scoped JWT claims and tenant checks
-- Role-based access controls are applied at the application layer
+- Auth issues a global-identity JWT; it does not carry authoritative tenant IDs or tenant roles
+- Tenant Service checks current membership and role for its implemented tenant APIs
+- Planned Order operations must validate tenant membership before tenant-schema access
 - User credentials are hashed with BCrypt before persistence
 - Email verification is used for public registration flows
 - OAuth/OIDC participants are handled as external identity mappings rather than direct password-style authentication
-- Tenant data is retained in isolated schemas, with a shared public registry for platform metadata
+- Tenant metadata currently lives in Tenant Service tables; tenant-specific Order schemas are a target architecture, not a current feature
 
 ## Repository Structure
 
@@ -97,9 +98,8 @@ The `auth-service` is one of the central components of the platform and manages:
 
 - registration and verification flows
 - login and credential verification
-- account membership state
-- tenant-scoped authorization assumptions
-- JWT issuance for downstream services
+- global user identities and JWT issuance for downstream identity authentication
+- no tenant membership or tenant-scoped authorization; those responsibilities belong to Tenant Service
 
 The service also includes integration tests using PostgreSQL Testcontainers, which helps ensure the application can validate real database behavior in a Dockerized environment.
 

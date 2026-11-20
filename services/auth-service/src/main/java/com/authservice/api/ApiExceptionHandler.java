@@ -6,7 +6,6 @@ import com.authservice.service.EmailDeliveryException;
 import com.authservice.service.ExternalIdentityConflictException;
 import com.authservice.service.ExternalIdentityNotLinkedException;
 import com.authservice.service.RateLimitExceededException;
-import com.authservice.service.TenantUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,17 +28,6 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<ApiError> handleBadCredentials(BadCredentialsException ex, HttpServletRequest request) {
-        ApiError error = ApiError.of(
-                HttpStatus.UNAUTHORIZED.value(),
-                HttpStatus.UNAUTHORIZED.getReasonPhrase(),
-                "Invalid credentials or account unavailable",
-                request.getRequestURI()
-        );
-        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(error);
-    }
-
-    @ExceptionHandler(TenantUnavailableException.class)
-    public ResponseEntity<ApiError> handleTenantUnavailable(TenantUnavailableException ex, HttpServletRequest request) {
         ApiError error = ApiError.of(
                 HttpStatus.UNAUTHORIZED.value(),
                 HttpStatus.UNAUTHORIZED.getReasonPhrase(),

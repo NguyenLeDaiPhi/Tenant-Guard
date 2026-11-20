@@ -50,7 +50,8 @@ public class GoogleOidcAuthenticationHandler implements AuthenticationSuccessHan
 
         try {
             AuthenticatedIdentity identity = externalIdentityService.authenticateGoogleIdentity(subject);
-            AccessTokenService.IssuedAccessToken issuedToken = accessTokenService.generateAccessToken(identity);
+            AccessTokenService.IssuedAccessToken issuedToken =
+                    accessTokenService.generateGlobalAccessToken(identity.globalUserId(), identity.email());
 
             response.setStatus(HttpStatus.OK.value());
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);

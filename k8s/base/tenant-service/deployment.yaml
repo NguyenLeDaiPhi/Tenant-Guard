@@ -1,0 +1,163 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenant-service
+  namespace: tenantguard-app
+  labels:
+    app.kubernetes.io/name: tenant-service
+    app.kubernetes.io/part-of: tenantguard-oms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tenant-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tenant-service
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tenant-service
+          image: ghcr.io/nguyenledaiphi/tenant-service:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8082
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          env:
+            - name: SERVER_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: SERVER_PORT
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: DATABASE_URL
+            - name: TENANT_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-db-credentials
+                  key: TENANT_DB_USERNAME
+            - name: TENANT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-db-credentials
+                  key: TENANT_DB_PASSWORD
+            - name: TENANT_MIGRATION_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-db-credentials
+                  key: TENANT_MIGRATION_USERNAME
+            - name: TENANT_MIGRATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-db-credentials
+                  key: TENANT_MIGRATION_PASSWORD
+            - name: AUTH_JWT_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: AUTH_JWT_ISSUER
+            - name: AUTH_JWT_AUDIENCE
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: AUTH_JWT_AUDIENCE
+            - name: AUTH_JWT_JWK_SET_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: AUTH_JWT_JWK_SET_URI
+            - name: MAIL_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: MAIL_HOST
+            - name: MAIL_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: MAIL_PORT
+            - name: MAIL_SMTP_AUTH
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: MAIL_SMTP_AUTH
+            - name: MAIL_SMTP_STARTTLS
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: MAIL_SMTP_STARTTLS
+            - name: MAIL_FROM
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: MAIL_FROM
+            - name: MAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-mail-credentials
+                  key: MAIL_USERNAME
+                  optional: true
+            - name: MAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-service-mail-credentials
+                  key: MAIL_PASSWORD
+                  optional: true
+            - name: TENANT_INVITATION_ACCEPT_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: tenant-service-config
+                  key: TENANT_INVITATION_ACCEPT_URL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

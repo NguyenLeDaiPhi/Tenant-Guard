@@ -3,13 +3,12 @@ package com.authservice.service;
 import com.authservice.domain.AuthenticatedIdentity;
 import com.authservice.persistence.ExternalIdentity;
 import com.authservice.persistence.ExternalIdentityRepository;
-import com.authservice.persistence.UserAccount;
-import com.authservice.persistence.UserAccountRepository;
+import com.authservice.persistence.UserIdentity;
+import com.authservice.persistence.UserIdentityRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -18,16 +17,13 @@ public class ExternalIdentityService {
     public static final String PROVIDER_GOOGLE = "GOOGLE";
 
     private final ExternalIdentityRepository externalIdentityRepository;
-    private final UserAccountRepository userAccountRepository;
-    private final TenantStatusService tenantStatusService;
+    private final UserIdentityRepository userIdentityRepository;
 
     public ExternalIdentityService(
             ExternalIdentityRepository externalIdentityRepository,
-            UserAccountRepository userAccountRepository,
-            TenantStatusService tenantStatusService) {
+            UserIdentityRepository userIdentityRepository) {
         this.externalIdentityRepository = externalIdentityRepository;
-        this.userAccountRepository = userAccountRepository;
-        this.tenantStatusService = tenantStatusService;
+        this.userIdentityRepository = userIdentityRepository;
     }
 
     @Transactional(readOnly = true)
@@ -39,20 +35,20 @@ public class ExternalIdentityService {
         ExternalIdentity identity = externalIdentityRepository
                 .findByProviderAndProviderSubject(PROVIDER_GOOGLE, providerSubject)
                 .orElseThrow(() -> new ExternalIdentityNotLinkedException(
-                        "Google identity is not linked to any user account"));
-
-        UserAccount user = userAccountRepository.findById(identity.getUserId())
-                .orElseThrow(() -> new ExternalIdentityNotLinkedException(
-                        "Associated user account no longer exists"));
-
-        Instant now = Instant.now();
-        if (!user.isAvailable(now)) {
-            throw new IllegalStateException("Associated user account is unavailable");
+                        "Google identity is not linked to any global user identity"));
+        if (identity.getGlobalUserId() == null) {
+            throw new ExternalIdentityNotLinkedException(
+                    "Google identity requires relinking to a global user identity");
         }
 
-        tenantStatusService.validateTenantActive(user.getTenantId());
-
-        return new AuthenticatedIdentity(user.getId(), user.getTenantId(), user.getRole(), user.getEmail());
+        Instant now = Instant.now();
+        UserIdentity globalIdentity = userIdentityRepository.findById(identity.getGlobalUserId())
+                .orElseThrow(() -> new ExternalIdentityNotLinkedException(
+                        "Associated global identity no longer exists"));
+        if (!globalIdentity.isAvailable(now)) {
+            throw new IllegalStateException("Associated global identity is unavailable");
+        }
+        return new AuthenticatedIdentity(globalIdentity.getId(), globalIdentity.getEmail());
     }
 
     @Transactional
@@ -67,25 +63,27 @@ public class ExternalIdentityService {
             throw new IllegalArgumentException("Provider subject must not be blank");
         }
 
-        UserAccount user = userAccountRepository.findById(userId)
-                .orElseThrow(() -> new IllegalArgumentException("User does not exist: " + userId));
+        UserIdentity globalIdentity = userIdentityRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("Global identity does not exist: " + userId));
+        if (!globalIdentity.isVerified()) {
+            throw new IllegalArgumentException("Global identity must be verified before linking");
+        }
 
-        Optional<ExternalIdentity> existingOpt = externalIdentityRepository
+        var existingOpt = externalIdentityRepository
                 .findByProviderAndProviderSubject(provider, providerSubject);
 
         if (existingOpt.isPresent()) {
             ExternalIdentity existing = existingOpt.get();
-            if (!existing.getUserId().equals(userId)) {
+            if (!userId.equals(existing.getGlobalUserId())) {
                 throw new ExternalIdentityConflictException(
-                        "External identity is already linked to a different account");
+                        "External identity is already linked to a different global identity");
             }
-            // Idempotent: same identity linked to the same account
             return existing;
         }
 
         ExternalIdentity newIdentity = ExternalIdentity.builder()
                 .id(UUID.randomUUID())
-                .userId(user.getId())
+                .globalUserId(globalIdentity.getId())
                 .provider(provider)
                 .providerSubject(providerSubject)
                 .emailVerified(emailVerified)

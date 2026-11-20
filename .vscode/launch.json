@@ -4,6 +4,13 @@
             "type": "java",
             "name": "AuthServiceApplication",
             "request": "launch",
+            "mainClass": "AuthServiceApplication",
+            "projectName": "tenant-service"
+        },
+        {
+            "type": "java",
+            "name": "AuthServiceApplication",
+            "request": "launch",
             "mainClass": "com.authservice.AuthServiceApplication",
             "projectName": "auth-service"
         },

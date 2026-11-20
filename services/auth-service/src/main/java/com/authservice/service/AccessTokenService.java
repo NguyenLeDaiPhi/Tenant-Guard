@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 public class AccessTokenService {
@@ -27,28 +28,29 @@ public class AccessTokenService {
     }
 
     public IssuedAccessToken generateAccessToken(AuthenticatedIdentity identity) {
+        return generateGlobalAccessToken(identity.globalUserId(), identity.email());
+    }
+
+    public IssuedAccessToken generateGlobalAccessToken(UUID globalUserId, String email) {
         Instant now = Instant.now();
         Instant expiresAt = now.plus(properties.accessTokenTtl());
 
-        JwtClaimsSet.Builder claimsBuilder = JwtClaimsSet.builder()
+        JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer(properties.issuer())
                 .audience(List.of(properties.audience()))
-                .subject(identity.userId().toString())
+                .subject(globalUserId.toString())
                 .issuedAt(now)
                 .notBefore(now)
                 .expiresAt(expiresAt)
-                .claim("roles", identity.role().name())
-                .claim("email", identity.email());
-
-        if (identity.tenantId() != null) {
-            claimsBuilder.claim("tid", identity.tenantId().toString());
-        }
+                .claim("global_user_id", globalUserId.toString())
+                .claim("email", email)
+                .build();
 
         JwsHeader jwsHeader = JwsHeader.with(SignatureAlgorithm.RS256)
                 .keyId(properties.keyId())
                 .build();
 
-        String token = jwtEncoder.encode(JwtEncoderParameters.from(jwsHeader, claimsBuilder.build()))
+        String token = jwtEncoder.encode(JwtEncoderParameters.from(jwsHeader, claims))
                 .getTokenValue();
 
         return new IssuedAccessToken(token, properties.accessTokenTtl());

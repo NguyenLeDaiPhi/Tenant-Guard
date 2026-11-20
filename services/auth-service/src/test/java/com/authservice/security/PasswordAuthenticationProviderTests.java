@@ -1,10 +1,8 @@
 package com.authservice.security;
 
-import com.authservice.domain.AccountStatus;
-import com.authservice.domain.UserRole;
-import com.authservice.persistence.UserAccount;
-import com.authservice.persistence.UserAccountRepository;
-import com.authservice.service.TenantStatusService;
+import com.authservice.domain.IdentityStatus;
+import com.authservice.persistence.UserIdentity;
+import com.authservice.persistence.UserIdentityRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -28,9 +26,7 @@ import static org.mockito.Mockito.when;
 
 class PasswordAuthenticationProviderTests {
 
-    private static final UUID TENANT_ID = UUID.fromString("11111111-1111-4111-8111-111111111111");
-    private UserAccountRepository userAccountRepository;
-    private TenantStatusService tenantStatusService;
+    private UserIdentityRepository userIdentityRepository;
     private PasswordEncoder passwordEncoder;
     private PasswordAuthenticationProvider provider;
 
@@ -39,172 +35,123 @@ class PasswordAuthenticationProviderTests {
 
     @BeforeEach
     void setUp() {
-        userAccountRepository = mock(UserAccountRepository.class);
-        tenantStatusService = mock(TenantStatusService.class);
+        userIdentityRepository = mock(UserIdentityRepository.class);
         passwordEncoder = new BCryptPasswordEncoder();
-        provider = new PasswordAuthenticationProvider(userAccountRepository, tenantStatusService, passwordEncoder);
+        provider = new PasswordAuthenticationProvider(userIdentityRepository, passwordEncoder);
     }
 
     @Test
-    void rejectsTenantWhenTenantIsInactive() {
-        UUID tenantId = TENANT_ID;
-        when(tenantStatusService.isTenantActive(tenantId)).thenReturn(false);
-
-        PasswordAuthenticationToken token = new PasswordAuthenticationToken(tenantId, "user@example.com", rawPassword);
-
-        assertThatThrownBy(() -> provider.authenticate(token))
-                .isInstanceOf(BadCredentialsException.class)
-                .hasMessage("Invalid credentials or account unavailable");
-
-        verify(userAccountRepository, never()).findByTenantIdAndNormalizedEmail(any(), any());
-    }
-
-    @Test
-    void locksAccountAfterTenIncorrectPasswords() {
-        UUID tenantId = TENANT_ID;
+    void acceptsVerifiedGlobalIdentityWithoutTenantMembership() {
+        UUID userId = UUID.randomUUID();
         String email = "user@example.com";
-        when(tenantStatusService.isTenantActive(tenantId)).thenReturn(true);
+        UserIdentity identity = verifiedIdentity(userId, email);
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(identity));
 
-        UserAccount user = UserAccount.builder()
-                .id(UUID.randomUUID())
-                .tenantId(tenantId)
-                .email(email)
-                .normalizedEmail(email)
-                .passwordHash(encodedPassword)
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .failedLoginCount(9) // 9th failure previously
-                .build();
-
-        when(userAccountRepository.findByTenantIdAndNormalizedEmail(eq(tenantId), eq(email)))
-                .thenReturn(Optional.of(user));
-
-        PasswordAuthenticationToken token = new PasswordAuthenticationToken(tenantId, email, "WrongPassword!");
-
-        assertThatThrownBy(() -> provider.authenticate(token))
-                .isInstanceOf(BadCredentialsException.class)
-                .hasMessage("Invalid credentials or account unavailable");
-
-        ArgumentCaptor<UserAccount> captor = ArgumentCaptor.forClass(UserAccount.class);
-        verify(userAccountRepository).save(captor.capture());
-        UserAccount savedUser = captor.getValue();
-        assertThat(savedUser.getFailedLoginCount()).isEqualTo(10);
-        assertThat(savedUser.getStatus()).isEqualTo(AccountStatus.LOCKED);
-        assertThat(savedUser.getLockedUntil()).isNotNull();
-    }
-
-    @Test
-    void rejectsIncorrectPasswordAndRecordsFailure() {
-        UUID tenantId = TENANT_ID;
-        String email = "user@example.com";
-        when(tenantStatusService.isTenantActive(tenantId)).thenReturn(true);
-
-        UserAccount user = UserAccount.builder()
-                .id(UUID.randomUUID())
-                .tenantId(tenantId)
-                .email(email)
-                .normalizedEmail(email)
-                .passwordHash(encodedPassword)
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .failedLoginCount(2)
-                .build();
-
-        when(userAccountRepository.findByTenantIdAndNormalizedEmail(eq(tenantId), eq(email)))
-                .thenReturn(Optional.of(user));
-
-        PasswordAuthenticationToken token = new PasswordAuthenticationToken(tenantId, email, "WrongPassword!");
-
-        assertThatThrownBy(() -> provider.authenticate(token))
-                .isInstanceOf(BadCredentialsException.class)
-                .hasMessage("Invalid credentials or account unavailable");
-
-        ArgumentCaptor<UserAccount> captor = ArgumentCaptor.forClass(UserAccount.class);
-        verify(userAccountRepository).save(captor.capture());
-        UserAccount savedUser = captor.getValue();
-        assertThat(savedUser.getFailedLoginCount()).isEqualTo(3);
-        assertThat(savedUser.getStatus()).isEqualTo(AccountStatus.ACTIVE);
-    }
-
-    @Test
-    void acceptsValidPasswordForActiveAccountAndTenant() {
-        UUID tenantId = TENANT_ID;
-        String email = "user@example.com";
-        when(tenantStatusService.isTenantActive(tenantId)).thenReturn(true);
-
-        UserAccount user = UserAccount.builder()
-                .id(UUID.randomUUID())
-                .tenantId(tenantId)
-                .email(email)
-                .normalizedEmail(email)
-                .passwordHash(encodedPassword)
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.ACTIVE)
-                .failedLoginCount(3)
-                .build();
-
-        when(userAccountRepository.findByTenantIdAndNormalizedEmail(eq(tenantId), eq(email)))
-                .thenReturn(Optional.of(user));
-
-        PasswordAuthenticationToken token = new PasswordAuthenticationToken(tenantId, email, rawPassword);
-        Authentication result = provider.authenticate(token);
+        Authentication result = provider.authenticate(new PasswordAuthenticationToken(email, rawPassword));
 
         assertThat(result).isNotNull();
         assertThat(result.isAuthenticated()).isTrue();
-        assertThat(result.getPrincipal()).isInstanceOf(UserAccountPrincipal.class);
-        UserAccountPrincipal principal = (UserAccountPrincipal) result.getPrincipal();
-        assertThat(principal.getUsername()).isEqualTo(email);
-        assertThat(principal.getRole()).isEqualTo(UserRole.ORDER_VIEWER);
-
-        ArgumentCaptor<UserAccount> captor = ArgumentCaptor.forClass(UserAccount.class);
-        verify(userAccountRepository).save(captor.capture());
-        UserAccount savedUser = captor.getValue();
-        assertThat(savedUser.getFailedLoginCount()).isEqualTo(0);
-        assertThat(savedUser.getLastLoginAt()).isNotNull();
+        assertThat(result.getPrincipal()).isEqualTo(new GlobalUserPrincipal(userId, email));
+        verify(userIdentityRepository).save(identity);
     }
 
     @Test
-    void rejectsDisabledAndLockedAccountsEvenWhenPasswordIsCorrect() {
-        UUID tenantId = TENANT_ID;
+    void rejectsIncorrectPasswordAndRecordsFailureOnGlobalIdentity() {
         String email = "user@example.com";
-        when(tenantStatusService.isTenantActive(tenantId)).thenReturn(true);
+        UserIdentity identity = verifiedIdentity(UUID.randomUUID(), email);
+        identity.setFailedLoginCount(2);
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(identity));
 
-        // Case 1: DISABLED account
-        UserAccount disabledUser = UserAccount.builder()
+        assertInvalidCredentials(email, "WrongPassword!");
+
+        ArgumentCaptor<UserIdentity> captor = ArgumentCaptor.forClass(UserIdentity.class);
+        verify(userIdentityRepository).save(captor.capture());
+        assertThat(captor.getValue().getFailedLoginCount()).isEqualTo(3);
+        assertThat(captor.getValue().getStatus()).isEqualTo(IdentityStatus.VERIFIED);
+    }
+
+    @Test
+    void locksGlobalIdentityAfterTenIncorrectPasswords() {
+        String email = "user@example.com";
+        UserIdentity identity = verifiedIdentity(UUID.randomUUID(), email);
+        identity.setFailedLoginCount(9);
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(identity));
+
+        assertInvalidCredentials(email, "WrongPassword!");
+
+        assertThat(identity.getFailedLoginCount()).isEqualTo(10);
+        assertThat(identity.getStatus()).isEqualTo(IdentityStatus.LOCKED);
+        assertThat(identity.getLockedUntil()).isAfter(Instant.now());
+        verify(userIdentityRepository).save(identity);
+    }
+
+    @Test
+    void rejectsUnverifiedDisabledAndLockedGlobalIdentities() {
+        String email = "user@example.com";
+        UserIdentity pending = UserIdentity.builder()
                 .id(UUID.randomUUID())
-                .tenantId(tenantId)
                 .email(email)
                 .normalizedEmail(email)
                 .passwordHash(encodedPassword)
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.DISABLED)
+                .status(IdentityStatus.PENDING_EMAIL)
                 .build();
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(pending));
+        assertInvalidCredentials(email, rawPassword);
 
-        when(userAccountRepository.findByTenantIdAndNormalizedEmail(eq(tenantId), eq(email)))
-                .thenReturn(Optional.of(disabledUser));
+        UserIdentity disabled = verifiedIdentity(UUID.randomUUID(), email);
+        disabled.setStatus(IdentityStatus.DISABLED);
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(disabled));
+        assertInvalidCredentials(email, rawPassword);
 
-        PasswordAuthenticationToken token1 = new PasswordAuthenticationToken(tenantId, email, rawPassword);
-        assertThatThrownBy(() -> provider.authenticate(token1))
-                .isInstanceOf(BadCredentialsException.class)
-                .hasMessage("Invalid credentials or account unavailable");
+        UserIdentity locked = verifiedIdentity(UUID.randomUUID(), email);
+        locked.setStatus(IdentityStatus.LOCKED);
+        locked.setLockedUntil(Instant.now().plusSeconds(600));
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(locked));
+        assertInvalidCredentials(email, rawPassword);
 
-        // Case 2: LOCKED account (lock not expired)
-        UserAccount lockedUser = UserAccount.builder()
-                .id(UUID.randomUUID())
-                .tenantId(tenantId)
+        verify(userIdentityRepository, never()).save(any(UserIdentity.class));
+    }
+
+    @Test
+    void successfulLoginResetsExpiredLockoutState() {
+        String email = "user@example.com";
+        UserIdentity identity = verifiedIdentity(UUID.randomUUID(), email);
+        identity.setStatus(IdentityStatus.LOCKED);
+        identity.setFailedLoginCount(10);
+        identity.setLockedUntil(Instant.now().minusSeconds(1));
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.of(identity));
+
+        Authentication result = provider.authenticate(new PasswordAuthenticationToken(email, rawPassword));
+
+        assertThat(result.isAuthenticated()).isTrue();
+        assertThat(identity.getStatus()).isEqualTo(IdentityStatus.VERIFIED);
+        assertThat(identity.getFailedLoginCount()).isZero();
+        assertThat(identity.getLockedUntil()).isNull();
+        assertThat(identity.getLastLoginAt()).isNotNull();
+        verify(userIdentityRepository).save(identity);
+    }
+
+    @Test
+    void rejectsUnknownIdentityWithGenericError() {
+        String email = "missing@example.com";
+        when(userIdentityRepository.findByNormalizedEmailForUpdate(email)).thenReturn(Optional.empty());
+
+        assertInvalidCredentials(email, rawPassword);
+    }
+
+    private UserIdentity verifiedIdentity(UUID id, String email) {
+        return UserIdentity.builder()
+                .id(id)
                 .email(email)
                 .normalizedEmail(email)
                 .passwordHash(encodedPassword)
-                .role(UserRole.ORDER_VIEWER)
-                .status(AccountStatus.LOCKED)
-                .lockedUntil(Instant.now().plusSeconds(600))
+                .status(IdentityStatus.VERIFIED)
+                .emailVerifiedAt(Instant.now())
                 .build();
+    }
 
-        when(userAccountRepository.findByTenantIdAndNormalizedEmail(eq(tenantId), eq(email)))
-                .thenReturn(Optional.of(lockedUser));
-
-        PasswordAuthenticationToken token2 = new PasswordAuthenticationToken(tenantId, email, rawPassword);
-        assertThatThrownBy(() -> provider.authenticate(token2))
+    private void assertInvalidCredentials(String email, String password) {
+        assertThatThrownBy(() -> provider.authenticate(new PasswordAuthenticationToken(email, password)))
                 .isInstanceOf(BadCredentialsException.class)
                 .hasMessage("Invalid credentials or account unavailable");
     }

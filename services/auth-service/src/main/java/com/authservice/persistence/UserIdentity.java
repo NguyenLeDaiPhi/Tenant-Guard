@@ -16,6 +16,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.util.UUID;
 
 @Entity
@@ -26,6 +27,9 @@ import java.util.UUID;
 @AllArgsConstructor
 @Builder
 public class UserIdentity {
+
+    public static final int MAX_FAILED_ATTEMPTS = 10;
+    public static final Duration LOCK_DURATION = Duration.ofMinutes(15);
 
     @Id
     @Column(name = "id", nullable = false, updatable = false)
@@ -53,6 +57,16 @@ public class UserIdentity {
     @Column(name = "email_verified_at")
     private Instant emailVerifiedAt;
 
+    @Column(name = "failed_login_count", nullable = false)
+    @Builder.Default
+    private int failedLoginCount = 0;
+
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
+
+    @Column(name = "last_login_at")
+    private Instant lastLoginAt;
+
     @PrePersist
     protected void onCreate() {
         if (id == null) {
@@ -73,11 +87,38 @@ public class UserIdentity {
     }
 
     public boolean isVerified() {
+        return status != IdentityStatus.PENDING_EMAIL && emailVerifiedAt != null;
+    }
+
+    public boolean isAvailable(Instant now) {
+        if (status == IdentityStatus.PENDING_EMAIL || status == IdentityStatus.DISABLED) {
+            return false;
+        }
+        if (status == IdentityStatus.LOCKED) {
+            return lockedUntil != null && now.isAfter(lockedUntil);
+        }
         return status == IdentityStatus.VERIFIED && emailVerifiedAt != null;
     }
 
     public void verify(Instant now) {
         status = IdentityStatus.VERIFIED;
         emailVerifiedAt = now;
+    }
+
+    public void recordFailedLogin(Instant now) {
+        failedLoginCount++;
+        if (failedLoginCount >= MAX_FAILED_ATTEMPTS) {
+            status = IdentityStatus.LOCKED;
+            lockedUntil = now.plus(LOCK_DURATION);
+        }
+    }
+
+    public void recordSuccessfulLogin(Instant now) {
+        failedLoginCount = 0;
+        lockedUntil = null;
+        if (status == IdentityStatus.LOCKED) {
+            status = IdentityStatus.VERIFIED;
+        }
+        lastLoginAt = now;
     }
 }

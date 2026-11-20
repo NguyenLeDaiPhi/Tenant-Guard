@@ -1,23 +1,17 @@
 package com.authservice.domain;
 
-import java.util.Objects;
 import java.util.UUID;
 
 public record AuthenticatedIdentity(
-        UUID userId,
-        UUID tenantId,
-        UserRole role,
+        UUID globalUserId,
         String email
 ) {
     public AuthenticatedIdentity {
-        Objects.requireNonNull(userId, "userId must not be null");
-        Objects.requireNonNull(role, "role must not be null");
-        Objects.requireNonNull(email, "email must not be null");
-        if (role == UserRole.PLATFORM_ADMIN && tenantId != null) {
-            throw new IllegalArgumentException("Platform admin must not have a tenant ID");
+        if (globalUserId == null) {
+            throw new IllegalArgumentException("Global user ID must not be null");
         }
-        if (role != UserRole.PLATFORM_ADMIN && tenantId == null) {
-            throw new IllegalArgumentException("Tenant users must have a tenant ID");
+        if (email == null || email.isBlank()) {
+            throw new IllegalArgumentException("Email must not be blank");
         }
     }
 }

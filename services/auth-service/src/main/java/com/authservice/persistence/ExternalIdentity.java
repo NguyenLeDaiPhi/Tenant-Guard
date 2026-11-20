@@ -27,8 +27,8 @@ public class ExternalIdentity {
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
-    @Column(name = "user_id", nullable = false)
-    private UUID userId;
+    @Column(name = "global_user_id")
+    private UUID globalUserId;
 
     @Column(name = "provider", nullable = false, length = 32)
     private String provider;

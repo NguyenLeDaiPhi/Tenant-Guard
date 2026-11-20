@@ -4,9 +4,8 @@ import com.authservice.api.dto.AccessTokenResponse;
 import com.authservice.api.dto.LoginRequest;
 import com.authservice.api.dto.RegisterRequest;
 import com.authservice.api.dto.RegistrationAcceptedResponse;
-import com.authservice.domain.AuthenticatedIdentity;
+import com.authservice.security.GlobalUserPrincipal;
 import com.authservice.security.PasswordAuthenticationToken;
-import com.authservice.security.UserAccountPrincipal;
 import com.authservice.service.AccessTokenService;
 import com.authservice.service.RegistrationService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -40,19 +39,18 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<AccessTokenResponse> login(@Valid @RequestBody LoginRequest request) {
         PasswordAuthenticationToken unauthenticated = new PasswordAuthenticationToken(
-                request.tenantId(),
                 request.email(),
                 request.password()
         );
         Authentication authenticated = authenticationManager.authenticate(unauthenticated);
 
-        UserAccountPrincipal principal = (UserAccountPrincipal) authenticated.getPrincipal();
-        AuthenticatedIdentity identity = principal.toAuthenticatedIdentity();
-        AccessTokenService.IssuedAccessToken issuedToken = accessTokenService.generateAccessToken(identity);
+        GlobalUserPrincipal principal = (GlobalUserPrincipal) authenticated.getPrincipal();
+        AccessTokenService.IssuedAccessToken issuedToken =
+                accessTokenService.generateGlobalAccessToken(principal.globalUserId(), principal.email());
 
         return ResponseEntity.ok(new AccessTokenResponse(
                 issuedToken.token(),
-                "Bearer",
+                "Bearer", 
                 issuedToken.expiresIn().toSeconds()
         ));
     }
